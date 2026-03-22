@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/vfs",
+    "crates/fuse",
+    "crates/meta",
+    "crates/network",
+    "crates/storage",
+    "crates/consensus",
+]
+
+resolver = "2"
+
+[workspace.dependencies]
+tokio     = { version = "1", features = ["full"] }
+serde     = { version = "1", features = ["derive"] }
+thiserror = "1"
+tracing   = "0.1"
+anyhow    = "1"

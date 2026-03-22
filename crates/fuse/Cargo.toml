@@ -1,0 +1,12 @@
+[package]
+name    = "fuse"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common  = { path = "../common" }
+vfs     = { path = "../vfs" }
+#fuser   = "0.14"
+tokio   = { workspace = true }
+tracing = { workspace = true }
+libc    = "0.2"

@@ -1,0 +1,13 @@
+[package]
+name    = "consensus"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common  = { path = "../common" }
+storage = { path = "../storage" }
+tokio   = { workspace = true }
+serde   = { workspace = true }
+tracing = { workspace = true }
+openraft = { version = "0.9", features = ["serde"] }
+sled    = "0.34"
