@@ -1,3 +1,47 @@
-Commands
-cargo check
-cargo test
+FerumFS: A Crash-Consistent, High-Performance Distributed File System
+## Status: Active Development
+
+## Overview
+FerumFS is a distributed file system written in Rust, focused on performance and crash consistency.
+It uses Tokio for asynchronous I/O and FUSE3 for userspace filesystem mounting.
+
+### Prerequisites
+- Rust 1.9 or Newer
+
+## Getting Started
+cargo run -- <mount_point>
+
+## Project Structure
+Project is strucured in Rust Crates.
+
+FerumFS
+├── crates/
+    ├──common/      #
+    ├──consensus/   # implementation of raft
+    ├──fuse/        # fuse3 ant is use in my own FUSE
+    ├──meta/        #  metadata
+    ├──network/     # server
+    ├──storage/     # journaling and wal system
+    └──vfs/         # virtual file system
+├──ffs.rs
+└──cargo.toml
+
+
+### Completed
+- Project structure
+- FUSE layer — userspace filesystem mounting via `fuse3`
+
+### In Progress
+- Raft consensus implementation
+
+### Planned
+- WAL and journaling (`storage` crate)
+- Metadata layer
+- Network layer (inter-node communication)
+- Virtual filesystem abstraction (`vfs` crate)
+- Consistency guarantees
+
+## References and Documentation
+1. [Designing Data-Intensive Applications — Martin Kleppmann] — primary guide
+2. [Osnovi Operativnih Sistema- Dragan Milicev ]- secondary guide from University
+
