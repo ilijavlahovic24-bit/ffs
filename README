@@ -7,16 +7,17 @@ It uses Tokio for asynchronous I/O and FUSE3 for userspace filesystem mounting.
 
 ### Prerequisites
 - Rust 1.9 or Newer
+- Linux or WSL
 
 ## Getting Started
 cargo run -- <mount_point>
 
 ## Project Structure
-Project is strucured in Rust Crates.
+Project is structured in Rust Crates.
 
 FerumFS
 ├── crates/
-    ├──common/      #
+    ├──common/      # Shared types and utilities
     ├──consensus/   # implementation of raft
     ├──fuse/        # fuse3 ant is use in my own FUSE
     ├──meta/        #  metadata

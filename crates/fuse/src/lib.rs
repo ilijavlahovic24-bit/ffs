@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::sync::Arc;
-use fuse3::path::Request;
+use fuse3::raw::Request;
 use fuse3::raw::Filesystem;
 use crate::attr::AttrHandler;
 use crate::dir::DirHandler;
@@ -67,7 +67,7 @@ impl Filesystem for DistributedFUSE {
     }
 
     async fn write(&self, req: Request, inode: u64, fh: u64, offset: u64, data: &[u8],writeflags:u32, flags: u32) -> fuse3::Result<ReplyWrite> {
-        self.file_handler.write(req, inode, fh, offset, data, flags).await
+        self.file_handler.write(req, inode, fh, offset, data, writeflags,flags).await
     }
 
     async fn readdir(&self, req: Request, inode: u64, fh: u64, offset: i64) -> fuse3::Result<ReplyDirectory<impl Stream<Item = fuse3::Result<DirectoryEntry>> + Send + '_>> {

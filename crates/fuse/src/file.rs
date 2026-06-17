@@ -28,7 +28,7 @@ impl FileHandler {
         todo!("Implement distributed read")
     }
 
-    pub async fn write(&self, _req: Request, inode: u64, _fh: u64, offset: u64, data: &[u8], _flags: u32) -> Result<ReplyWrite> {
+    pub async fn write(&self, _req: Request, inode: u64, _fh: u64, offset: u64, data: &[u8], writeflags: u32, flags:u32) -> Result<ReplyWrite> {
         // Write to storage service
         // This should forward to storage layer
         todo!("Implement distributed write")
