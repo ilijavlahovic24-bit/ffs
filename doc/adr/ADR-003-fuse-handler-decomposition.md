@@ -55,10 +55,11 @@ reduced to one-line delegations to the appropriate handler method.
   or inconsistent state, and gives a single place to later add
   concurrency-safety guarantees when these managers are extended to
   coordinate with the distributed metadata layer.
-- This structure is intended to read clearly in a CV/interview context:
-  it demonstrates separation of concerns and ownership design in Rust
-  (`Arc`-shared state across async handlers) rather than a flat
-  trait implementation copied from a reference example.
+- This structure expresses clear separation of concerns and ownership
+  design in Rust (Arc-shared state across async handlers), rather
+  than a flat trait implementation copied directly from a reference
+  example, which makes the responsibility boundaries easier to reason
+  about as the implementation grows.
 - The monolithic approach was rejected because it does not scale
   past the hello-world stage: as soon as real inode/handle state and
   distributed forwarding logic are introduced, a single struct
@@ -82,4 +83,4 @@ reduced to one-line delegations to the appropriate handler method.
 - `DirHandler` and `FileHandler` currently contain `todo!()` stubs for
   operations that require forwarding to the (not yet implemented)
   storage/metadata layer — this is expected and tracked under the
-  development order in ADR-001, not a defect of this decomposition.
+  development order in ADR-002, not a defect of this decomposition.

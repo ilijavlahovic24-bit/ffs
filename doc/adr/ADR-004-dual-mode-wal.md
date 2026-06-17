@@ -88,7 +88,7 @@ the context to decide based on the operation being performed.
 - The VFS layer takes on responsibility for the large/small
   classification decision; this logic does not yet exist and must be
   designed when the VFS crate is implemented (currently a `todo!()`
-  area, see ADR-001 for sequencing).
+  area, see ADR-002 for sequencing).
 - Checkpoint storage support is explicitly secondary: if supporting it
   cleanly within this dual-mode design requires compromises to the
   dataset-serving path, dataset serving takes priority and checkpoint
