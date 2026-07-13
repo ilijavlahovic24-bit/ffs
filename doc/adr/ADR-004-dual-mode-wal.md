@@ -12,8 +12,8 @@ ML training — many large data files (dataset shards, e.g.
 `.tfrecord`/`.parquet`-style files) read sequentially across multiple
 machines. 
 
-A secondary, lower-priority use case is **ML checkpoint
-storage** (infrequent, large model checkpoint writes), which should be
+A secondary, lower-priority use case is **ML checkpoint storage** 
+(infrequent, large model checkpoint writes), which should be
 supported if it does not compromise the dataset-serving design, but is
 not the primary design driver.
 
