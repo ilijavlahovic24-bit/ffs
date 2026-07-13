@@ -53,7 +53,7 @@ Split the storage layer's write-ahead logging into two distinct paths:
 
 The threshold or heuristic for classifying a given write as "large"
 (data path) versus "small" (metadata WAL) is **not** owned by the
-storage crate — this decision is delegated to the VFS layer, which has
+storage crate — this decision is delegated to the VFS layer, which will have
 the context to decide based on the operation being performed.
 
 ## Rationale
