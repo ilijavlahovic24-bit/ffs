@@ -1,10 +1,10 @@
 
 #[allow(unused)]
-struct WAL{
+struct DataWAL{
 
 }
 #[allow(unused)]
-impl WAL {
+impl DataWAL {
     pub fn append(){}
 }
 #[allow(unused)]
