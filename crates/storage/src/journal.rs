@@ -1,4 +1,5 @@
 #![allow(dead_code)]
 struct Journal{
-    i32:data
+    data:i32,
+    date:i32
 }
