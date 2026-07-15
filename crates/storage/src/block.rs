@@ -1,9 +1,11 @@
+use crc32fast::Hasher;
+
 #[allow(unused)]
 struct Block{
-    id:u64,         //Block ID
-    data:Vec<u8>,  //Block Data
-    checksum:u32,   //Check sum for data coruption
-    size:usize
+    pub id:u64,         //Block ID
+    pub data:Vec<u8>,  //Block Data
+    pub checksum:u32,   //Check sum for data coruption
+    pub size:usize
 }
 #[allow(unused)]
 impl Block{
@@ -12,8 +14,13 @@ impl Block{
         Block { id, data, checksum: 0, size }
     }
     //for getting check sum
-    pub fn crc32()->i32{
-        todo!("CRC32 algorithmfor checking whether datta fos corupted");
-        return 0;
+    pub fn crc32(data:&[u8])->u32{
+        let mut hasher = Hasher::new();
+        hasher.update(data);
+        hasher.finalize()
+
+    }
+    pub fn verify(&self) -> bool {
+        Self::crc32(&self.data) == self.checksum
     }
 }
