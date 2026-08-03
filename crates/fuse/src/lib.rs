@@ -6,16 +6,16 @@ use crate::attr::AttrHandler;
 use crate::dir::DirHandler;
 use crate::file::FileHandler;
 use crate::handles::HandleManager;
-use crate::inode::InodeManager;
 use fuse3::raw::reply::*;
 use futures_util::Stream;
+use crate::inode::InodeManager;
 
 mod attr;
 mod dir;
 mod file;
 mod handles;
-mod inode;
 mod mount;
+mod inode;
 
 pub struct DistributedFUSE {
     inode_manager: Arc<InodeManager>,

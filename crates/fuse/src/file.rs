@@ -4,8 +4,8 @@ use fuse3::raw::prelude::*;
 use fuse3::{Result};
 use fuse3::raw::reply::{ReplyAttr, ReplyInit, ReplyOpen, ReplyData, ReplyWrite};
 use bytes::Bytes;
-use crate::inode::InodeManager;
 use crate::handles::HandleManager;
+use crate::inode::InodeManager;
 
 pub struct FileHandler {
     inode_manager: Arc<InodeManager>,

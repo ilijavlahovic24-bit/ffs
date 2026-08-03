@@ -388,6 +388,8 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 name = "common"
 version = "0.1.0"
 dependencies = [
+ "dashmap 7.0.0-rc2",
+ "fuse3",
  "serde",
  "thiserror",
  "tracing",
@@ -455,6 +457,20 @@ dependencies = [
  "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
+ "parking_lot_core 0.9.12",
+]
+
+[[package]]
+name = "dashmap"
+version = "7.0.0-rc2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4a1e35a65fe0538a60167f0ada6e195ad5d477f6ddae273943596d4a1a5730b"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "equivalent",
+ "hashbrown 0.15.5",
+ "lock_api",
  "parking_lot_core 0.9.12",
 ]
 
@@ -571,7 +587,7 @@ dependencies = [
  "bytes",
  "common",
  "consensus",
- "dashmap",
+ "dashmap 5.5.3",
  "fuse3",
  "futures-util",
  "libc",
@@ -1689,6 +1705,7 @@ version = "0.1.0"
 dependencies = [
  "common",
  "crc32fast",
+ "meta",
  "serde",
  "thiserror",
  "tokio",

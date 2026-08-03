@@ -5,7 +5,7 @@ use fuse3::raw::reply::{ ReplyEntry, ReplyDirectory};
 use futures_util::stream::{self, Stream};
 use std::ffi::{OsStr, OsString};
 use std::time::{Duration, SystemTime};
-use crate::inode::{InodeManager, InodeInfo};
+use crate::inode::InodeManager;
 
 pub struct DirHandler {
     inode_manager: Arc<InodeManager>,
