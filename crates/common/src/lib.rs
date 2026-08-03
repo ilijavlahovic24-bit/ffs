@@ -1,5 +1,7 @@
 pub mod types;
 mod error;
+mod config;
+mod metric;
 
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
