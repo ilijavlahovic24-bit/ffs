@@ -51,7 +51,6 @@ impl From<InodeId> for FFSError {
 
 impl From<String> for FFSError {
     fn from(err: String) -> Self {
-        // Ovde možete dodati logiku ili jednostavno mapirati u Corruption
         FFSError::Corruption(err)
     }
 }
