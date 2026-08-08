@@ -14,7 +14,7 @@ pub struct Metric {
     bytes_written_total:AtomicU64,
 }
 impl Metric {
-    fn new() -> Metric {
+    pub fn new() -> Metric {
         Self{
             reads_total:AtomicU64::new(0),
             writes_total:AtomicU64::new(0),
@@ -28,15 +28,26 @@ impl Metric {
         }
     }
     //example metrics.increment(&metrics.reads_total);
-    fn increment(&self, counter: &AtomicU64){
+    pub fn increment(&self, counter: &AtomicU64){
         counter.fetch_add(1, Ordering::Relaxed);
     }
-    fn snapshot(&self) -> MetricsSnapshot{
-        todo!()
+    pub fn snapshot(&self) -> MetricsSnapshot{
+        MetricsSnapshot{
+            reads_total: self.reads_total.load(Ordering::Relaxed),
+            writes_total:self.writes_total.load(Ordering::Relaxed),
+            wal_appends_total:self.wal_appends_total.load(Ordering::Relaxed),
+            checksum_total:self.checksum_total.load(Ordering::Relaxed),
+
+            elections_started_total: self.elections_started_total.load(Ordering::Relaxed),
+            leader_changes_total: self.leader_changes_total.load(Ordering::Relaxed),
+            bytes_read_total: self.bytes_read_total.load(Ordering::Relaxed),
+            bytes_written_total: self.bytes_written_total.load(Ordering::Relaxed),
+        }
+
+
     }
 }
 pub struct MetricsSnapshot {
-    commits:AtomicU64,
     //storage operations
     reads_total:u64,
     writes_total:u64,
