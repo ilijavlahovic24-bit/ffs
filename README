@@ -33,10 +33,11 @@ FerumFS
 - FUSE layer — userspace filesystem mounting via `fuse3`
 
 ### In Progress
-- Raft consensus implementation
+- WAL and journaling (`storage` crate)
+
 
 ### Planned
-- WAL and journaling (`storage` crate)
+- Raft consensus implementation
 - Metadata layer
 - Network layer (inter-node communication)
 - Virtual filesystem abstraction (`vfs` crate)
