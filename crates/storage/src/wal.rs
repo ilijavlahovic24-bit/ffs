@@ -1,7 +1,11 @@
-
 pub use common::types::InodeId;
+
 enum Waloperations{
-    Create,Unlink,Mkdir,Rmdir,Rename
+    Create { inode_id: InodeId, parent_id: InodeId, name: String },
+    Unlink { parent_id: InodeId, name: String },
+    Mkdir  { inode_id: InodeId, parent_id: InodeId, name: String },
+    Rmdir  { parent_id: InodeId, name: String },
+    Rename { old_parent: InodeId, old_name: String, new_parent: InodeId, new_name: String }
 }
 #[allow(unused)]
 struct DataWAL{
