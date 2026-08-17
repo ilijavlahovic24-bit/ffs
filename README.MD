@@ -14,7 +14,7 @@ cargo run -- <mount_point>
 
 ## Project Structure
 Project is structured in Rust Crates.
-
+```
 FerumFS
 ├── crates/
     ├──common/      # Shared types and utilities
@@ -26,7 +26,7 @@ FerumFS
     └──vfs/         # virtual file system
 ├──ffs.rs
 └──cargo.toml
-
+```
 
 ### Completed
 - Project structure
