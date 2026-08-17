@@ -1,5 +1,5 @@
 pub mod types;
-mod error;
+pub mod error;
 mod config;
 mod metric;
 
