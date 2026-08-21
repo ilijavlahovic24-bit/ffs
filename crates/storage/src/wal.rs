@@ -15,15 +15,9 @@ enum Waloperation{
 struct DataPath{
     tmp_rid:PathBuf,
     data_path:PathBuf,
-    wal:Arc<MetaDataWal>
+    wal:Arc<MetadataWal>
 }
-#[allow(unused)]
-struct DataWAL{
-    waloperations: Waloperation,
-    inode_id:InodeId,
-    filename:String,
-    
-}
+
 struct WalEntry{
     sequence: u64,
     operation: Waloperation,
@@ -31,13 +25,13 @@ struct WalEntry{
 }
 
 #[allow(unused)]
-struct MetaDataWal{
+struct MetadataWal{
     path:PathBuf,
     file:File,
     sequence:AtomicU64
 }
 #[allow(unused)]
-impl MetaDataWal {
+impl MetadataWal {
     pub fn new(path: PathBuf) -> Result<Self, FfsError>{
         todo!()
     }
