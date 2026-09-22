@@ -47,16 +47,22 @@ struct MetadataWall {
 }
 #[allow(unused)]
 impl MetadataWall {
-    pub async fn new(path: PathBuf) -> Result<Self, FfsError>{
+    pub async fn new(path: PathBuf) -> Result<Self, FfsError> {
         let file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .await?;
+
+        // load existing entry if last sequence
+        let existing = Self::read_all(&path).await?;
+        let next_seq = existing.last().map(|e| e.sequence + 1).unwrap_or(0);
+
         Ok(Self {
             path,
             file: tokio::sync::Mutex::new(file),
-            sequence: AtomicU64::new(0),
+            sequence: AtomicU64::new(next_seq),
         })
     }
     pub async fn append(&self, op: WalOperation) -> Result<(), FfsError> {
