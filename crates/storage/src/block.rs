@@ -11,14 +11,14 @@ struct Block{
 impl Block{
     pub fn new(id: u64, data: Vec<u8>) -> Self {
         let size = data.len();
-        Block { id, data, checksum: 0, size }
+        let checksum=Self::crc32(&data);
+        Block { id, data, checksum, size }
     }
     //for getting check sum
     pub fn crc32(data:&[u8])->u32{
         let mut hasher = Hasher::new();
         hasher.update(data);
         hasher.finalize()
-
     }
     pub fn verify(&self) -> bool {
         Self::crc32(&self.data) == self.checksum

@@ -13,3 +13,4 @@ crc32fast = "1.3"
 
 # Project dependencies
 meta = { path = "../meta" }
+bincode   = { version = "2", features = ["serde"] }
