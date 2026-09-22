@@ -12,7 +12,8 @@ pub enum WalOperation {
     Unlink { parent_id: InodeId, name: String },
     Mkdir  { inode_id: InodeId, parent_id: InodeId, name: String },
     Rmdir  { parent_id: InodeId, name: String },
-    Rename { old_parent: InodeId, old_name: String, new_parent: InodeId, new_name: String }
+    Rename { old_parent: InodeId, old_name: String, new_parent: InodeId, new_name: String },
+    WriteBlob { inode_id: InodeId },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WalEntryPayload {
@@ -21,7 +22,7 @@ struct WalEntryPayload {
 }
 
 
-struct WalEntry{
+pub struct WalEntry{
     sequence: u64,
     operation: WalOperation,
     checksum: u32,
@@ -58,7 +59,7 @@ impl MetadataWall {
             sequence: AtomicU64::new(0),
         })
     }
-    pub async fn append(&mut self, op: WalOperation) -> Result<(), FfsError>{
+    pub async fn append(&self, op: WalOperation) -> Result<(), FfsError> {
         let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
         let (payload, checksum) = encode_payload(seq, &op)?;
 
@@ -122,15 +123,37 @@ impl MetadataWall {
 
 
 struct DataPath{
-    tmp_rid:PathBuf,
+    tmp_dir:PathBuf,
     data_path:PathBuf,
     wal:Arc<MetadataWall>
 }
 impl DataPath{
-    fn write_blob(inode_id: InodeId, data: &[u8]) -> Result<(), FfsError>{
-        todo!()
+    pub async fn new(tmp_dir: PathBuf, data_path: PathBuf, wal: Arc<MetadataWall>) -> Self {
+        Self { tmp_dir, data_path, wal }
     }
-    fn read_blob(inode_id: InodeId) -> Result<Vec<u8>, FfsError>{
-        todo!()
+    pub async fn write_blob(&self, inode_id: InodeId, data: &[u8]) -> Result<(), FfsError>{
+        let tmp=self.tmp_dir.join(format!("{inode_id}.tmp"));
+        let dst = self.data_path.join(inode_id.to_string());
+        {
+            let mut f = File::create(&tmp).await?;
+            f.write_all(data).await?;
+            f.sync_all().await?;
+        }
+        // 2. atomic rename
+        tokio::fs::rename(&tmp, &dst).await?;
+        // 3. WAL
+        self.wal.append(WalOperation::WriteBlob { inode_id }).await?;
+        Ok(())
+
+    }
+    pub async fn read_blob(&self, inode_id: InodeId) -> Result<Vec<u8>, FfsError>{
+        let dst = self.data_path.join(inode_id.to_string());
+        match tokio::fs::read(&dst).await {
+            Ok(b) => Ok(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(FfsError::NotFound(inode_id))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
