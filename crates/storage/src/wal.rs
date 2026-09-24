@@ -23,7 +23,7 @@ struct WalEntryPayload {
 
 
 pub struct WalEntry{
-    sequence: u64,
+    pub(crate) sequence: u64,
     operation: WalOperation,
     checksum: u32,
 }
@@ -40,13 +40,13 @@ fn encode_payload(sequence: u64, op: &WalOperation) -> Result<(Vec<u8>, u32), Ff
 }
 
 #[allow(unused)]
-struct MetadataWall {
+pub(crate) struct MetadataWal {
     path:PathBuf,
     file:tokio::sync::Mutex<File>,
     sequence:AtomicU64
 }
 #[allow(unused)]
-impl MetadataWall {
+impl MetadataWal {
     pub async fn new(path: PathBuf) -> Result<Self, FfsError> {
         let file = OpenOptions::new()
             .create(true)
@@ -131,10 +131,10 @@ impl MetadataWall {
 struct DataPath{
     tmp_dir:PathBuf,
     data_path:PathBuf,
-    wal:Arc<MetadataWall>
+    wal:Arc<MetadataWal>
 }
 impl DataPath{
-    pub async fn new(tmp_dir: PathBuf, data_path: PathBuf, wal: Arc<MetadataWall>) -> Self {
+    pub async fn new(tmp_dir: PathBuf, data_path: PathBuf, wal: Arc<MetadataWal>) -> Self {
         Self { tmp_dir, data_path, wal }
     }
     pub async fn write_blob(&self, inode_id: InodeId, data: &[u8]) -> Result<(), FfsError>{

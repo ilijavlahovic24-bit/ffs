@@ -11,9 +11,9 @@ pub struct InodeInfo {
     pub size: u64,
     pub mode: u16,
 }
-pub type BlockID = u64;
+pub type BlockId = u64;
 #[derive(Clone)]
 pub struct BlockInfo{
-    pub ino:BlockID,
+    pub ino: BlockId,
 
 }
