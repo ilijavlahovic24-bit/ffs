@@ -2,6 +2,7 @@ use std::sync::Arc;
 use fuse3::raw::prelude::*;
 use fuse3::Result;
 use fuse3::raw::reply::{ReplyEntry, ReplyDirectory};
+use fuse3::raw::reply::{ReplyDirectoryPlus, DirectoryEntryPlus};
 use futures_util::stream::{self, Stream};
 use std::ffi::OsStr;
 use std::time::{Duration, SystemTime};
@@ -186,5 +187,65 @@ impl DirHandler {
             .map_err(|_| libc::EIO)?;
 
         Ok(())
+    }
+    pub async fn readdirplus(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: u64,
+        offset: u64,
+        _lock_owner: u64,
+    ) -> Result<ReplyDirectoryPlus<impl Stream<Item = Result<DirectoryEntryPlus>> + Send + '_>> {
+        let parent = self.get_parent(inode).await;
+        let ttl = Duration::from_secs(1);
+
+        let mut entries: Vec<Result<DirectoryEntryPlus>> = Vec::new();
+
+        // "."
+        if let Some(info) = self.inode_manager.get_inode(inode) {
+            entries.push(Ok(DirectoryEntryPlus {
+                inode,
+                generation: 0,
+                kind: to_fuse_type(info.kind),
+                name: ".".into(),
+                offset: 1,
+                attr: to_file_attr(&info),
+                entry_ttl: ttl,
+                attr_ttl: ttl,
+            }));
+        }
+
+        // ".."
+        if let Some(info) = self.inode_manager.get_inode(parent) {
+            entries.push(Ok(DirectoryEntryPlus {
+                inode: parent,
+                generation: 0,
+                kind: to_fuse_type(info.kind),
+                name: "..".into(),
+                offset: 2,
+                attr: to_file_attr(&info),
+                entry_ttl: ttl,
+                attr_ttl: ttl,
+            }));
+        }
+
+        // deca
+        for (i, child) in self.inode_manager.children(inode).iter().enumerate() {
+            entries.push(Ok(DirectoryEntryPlus {
+                inode: child.ino,
+                generation: 0,
+                kind: to_fuse_type(child.kind),
+                name: child.name.clone().into(),
+                offset: 3 + i as i64,
+                attr: to_file_attr(child),
+                entry_ttl: ttl,
+                attr_ttl: ttl,
+            }));
+        }
+
+        let start = offset as usize;
+        Ok(ReplyDirectoryPlus {
+            entries: stream::iter(entries.into_iter().skip(start)),
+        })
     }
 }

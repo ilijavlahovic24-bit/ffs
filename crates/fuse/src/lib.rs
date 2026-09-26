@@ -32,8 +32,6 @@ pub struct DistributedFUSE {
     dir_handler: Arc<DirHandler>,
     file_handler: Arc<FileHandler>,
 
-    // drži se ovde da bi `DistributedFUSE` imao vlasništvo i da bi
-    // handleri mogli da dele `Arc`-ove
     #[allow(dead_code)]
     wal: Arc<MetadataWal>,
     #[allow(dead_code)]
@@ -147,6 +145,21 @@ impl Filesystem for DistributedFUSE {
         self.dir_handler.readdir(req, inode, fh, offset).await
     }
 
+    async fn readdirplus(
+        &self,
+        req: Request,
+        parent: u64,
+        fh: u64,
+        offset: u64,
+        lock_owner: u64,
+    ) -> fuse3::Result<
+        ReplyDirectoryPlus<impl Stream<Item = fuse3::Result<DirectoryEntryPlus>> + Send + '_>,
+    > {
+        self.dir_handler
+            .readdirplus(req, parent, fh, offset, lock_owner)
+            .await
+    }
+
     async fn mkdir(
         &self,
         req: Request,
@@ -169,7 +182,7 @@ impl Filesystem for DistributedFUSE {
         flags: u32,
     ) -> fuse3::Result<ReplyCreated> {
         self.file_handler
-            .create(req, parent, name, mode, flags)   // bez `as i32`
+            .create(req, parent, name, mode, flags)
             .await
     }
 
