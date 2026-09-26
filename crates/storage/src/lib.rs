@@ -1,4 +1,4 @@
 mod block;
-mod wal;
+pub mod wal;
 mod block_allocator;
-mod recovery;
+pub mod recovery;

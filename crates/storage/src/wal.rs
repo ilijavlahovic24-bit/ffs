@@ -31,7 +31,7 @@ struct WalEntryPayload {
 
 pub struct WalEntry{
     pub(crate) sequence: u64,
-    operation: WalOperation,
+    pub operation: WalOperation,
     checksum: u32,
 }
 const BINCODE: bincode::config::Configuration = bincode::config::standard();
@@ -47,7 +47,7 @@ fn encode_payload(sequence: u64, op: &WalOperation) -> Result<(Vec<u8>, u32), Ff
 }
 
 #[allow(unused)]
-pub(crate) struct MetadataWal {
+pub struct MetadataWal {
     path:PathBuf,
     file:tokio::sync::Mutex<File>,
     sequence:AtomicU64
@@ -135,7 +135,7 @@ impl MetadataWal {
 
 
 
-struct DataPath{
+pub struct DataPath{
     tmp_dir:PathBuf,
     data_path:PathBuf,
     wal:Arc<MetadataWal>
