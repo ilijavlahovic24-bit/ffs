@@ -16,14 +16,14 @@ use crate::file::FileHandler;
 use crate::handles::HandleManager;
 use crate::inode::InodeManager;
 
-mod attr;
-mod convert;
-mod dir;
-mod file;
-mod handles;
-mod helper;
-mod inode;
-mod mount;
+pub mod attr;
+pub mod convert;
+pub mod dir;
+pub mod file;
+pub mod handles;
+pub mod helper;
+pub mod inode;
+pub mod mount;
 
 pub struct DistributedFUSE {
     inode_manager: Arc<InodeManager>,
