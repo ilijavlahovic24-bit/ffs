@@ -1,3 +1,4 @@
+use common::types::FileType;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,9 +9,15 @@ pub use common::types::InodeId;
 use common::error::FfsError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalOperation {
-    Create { inode_id: InodeId, parent_id: InodeId, name: String },
+    Create {
+        inode_id: InodeId, parent_id: InodeId, name: String,
+        kind: FileType, mode: u16,
+    },
+    Mkdir {
+        inode_id: InodeId, parent_id: InodeId, name: String,
+        mode: u16,
+    },
     Unlink { parent_id: InodeId, name: String },
-    Mkdir  { inode_id: InodeId, parent_id: InodeId, name: String },
     Rmdir  { parent_id: InodeId, name: String },
     Rename { old_parent: InodeId, old_name: String, new_parent: InodeId, new_name: String },
     WriteBlob { inode_id: InodeId },

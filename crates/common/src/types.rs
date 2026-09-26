@@ -1,19 +1,22 @@
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use fuse3::{FileType, Result};
+// common/src/types.rs
+use serde::{Deserialize, Serialize};
+
 pub type InodeId = u64;
-#[derive(Clone)]
+pub type BlockId = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FileType {
+    File,
+    Directory,
+    Symlink,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InodeInfo {
     pub ino: InodeId,
-    pub parent: u64,
+    pub parent: InodeId,
     pub name: String,
     pub kind: FileType,
     pub size: u64,
     pub mode: u16,
-}
-pub type BlockId = u64;
-#[derive(Clone)]
-pub struct BlockInfo{
-    pub ino: BlockId,
-
 }

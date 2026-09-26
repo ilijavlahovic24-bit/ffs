@@ -5,7 +5,7 @@ use fuse3::raw::reply::{ReplyAttr, ReplyInit};
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime};
 use crate::inode::InodeManager;
-
+use crate::convert::to_fuse_type;
 pub struct AttrHandler {
     inode_manager: Arc<InodeManager>,
 }
@@ -27,6 +27,7 @@ impl AttrHandler {
 
     pub async fn getattr(&self, _req: Request, inode: u64, _fh: Option<u64>, _flags: u32) -> Result<ReplyAttr> {
         if let Some(info) = self.inode_manager.get_inode(inode) {
+            let kind = to_fuse_type(info.kind);   // <-- konverzija
             Ok(ReplyAttr {
                 ttl: Duration::from_secs(1),
                 attr: FileAttr {
@@ -38,9 +39,9 @@ impl AttrHandler {
                     ctime: SystemTime::now().into(),
                     #[cfg(target_os = "macos")]
                     crtime: SystemTime::now().into(),
-                    kind: info.kind,
+                    kind,                                           // <-- sad je fuse3 FileType
                     perm: info.mode,
-                    nlink: if info.kind == FileType::Directory { 2 } else { 1 },
+                    nlink: if kind == FileType::Directory { 2 } else { 1 },  // <-- poredi fuse3 sa fuse3
                     uid: 0,
                     gid: 0,
                     rdev: 0,

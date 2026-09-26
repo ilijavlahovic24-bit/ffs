@@ -16,6 +16,7 @@ mod file;
 mod handles;
 mod mount;
 mod inode;
+mod convert;
 
 pub struct DistributedFUSE {
     inode_manager: Arc<InodeManager>,

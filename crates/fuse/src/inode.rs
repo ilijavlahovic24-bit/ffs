@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
-use fuse3::FileType;
+use common::types::FileType;
 use common::types::InodeInfo;
 
 pub struct InodeManager {

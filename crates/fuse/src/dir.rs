@@ -5,6 +5,7 @@ use fuse3::raw::reply::{ ReplyEntry, ReplyDirectory};
 use futures_util::stream::{self, Stream};
 use std::ffi::{OsStr, OsString};
 use std::time::{Duration, SystemTime};
+use crate::convert::to_fuse_type;
 use crate::inode::InodeManager;
 
 pub struct DirHandler {
@@ -21,20 +22,21 @@ impl DirHandler {
 
         if let Some(ino) = self.inode_manager.lookup(parent, &name_str) {
             if let Some(info) = self.inode_manager.get_inode(ino) {
+                let kind = to_fuse_type(info.kind);
                 return Ok(ReplyEntry {
                     ttl: Duration::from_secs(1),
                     attr: FileAttr {
                         ino: info.ino,
                         size: info.size,
-                        blocks: 0,
+                        blocks: (info.size + 511) / 512,
                         atime: SystemTime::now().into(),
                         mtime: SystemTime::now().into(),
                         ctime: SystemTime::now().into(),
                         #[cfg(target_os = "macos")]
                         crtime: SystemTime::now().into(),
-                        kind: info.kind,
+                        kind,
                         perm: info.mode,
-                        nlink: if info.kind == FileType::Directory { 2 } else { 1 },
+                        nlink: if kind == fuse3::FileType::Directory { 2 } else { 1 },
                         uid: 0,
                         gid: 0,
                         rdev: 0,
