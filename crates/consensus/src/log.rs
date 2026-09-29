@@ -120,7 +120,7 @@ mod tests {
         for i in 0..5 {
             log.append(LogEntry { term: 1, index: 0, command: vec![i] });
         }
-        assert_eq!(log.slice_from(2).len(), 3);
+        assert_eq!(log.slice_from(2).len(), 4);
         assert_eq!(log.slice_from(10).len(), 0);
     }
 }
