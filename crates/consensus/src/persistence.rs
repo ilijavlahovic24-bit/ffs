@@ -120,3 +120,132 @@ impl RaftPersistence {
         Ok(entries)
     }
 }
+
+use std::path::PathBuf;
+
+use crate::{AppendEntries, NodeState, RaftNode};
+
+fn tmp_wal(name: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "ferumfs-raft-{}-{}.wal",
+        name,
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&p);
+    p
+}
+
+#[test]
+fn hard_state_survives_restart() {
+    let path = tmp_wal("hard_state");
+
+    {
+        let mut n = RaftNode::with_persistence(1, vec![2, 3], &path).unwrap();
+        n.start_election();
+        assert_eq!(n.current_term, 1);
+        assert_eq!(n.voted_for, Some(1));
+    }
+
+    let n2 = RaftNode::with_persistence(1, vec![2, 3], &path).unwrap();
+    assert_eq!(n2.current_term, 1);
+    assert_eq!(n2.voted_for, Some(1));
+    assert_eq!(n2.state, NodeState::Follower);
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn log_entries_survive_restart() {
+    let path = tmp_wal("log_entries");
+
+    {
+        let mut n = RaftNode::with_persistence(1, vec![], &path).unwrap();
+        n.state = NodeState::Leader;
+        n.current_term = 1;
+        n.propose(b"first".to_vec()).unwrap();
+        n.propose(b"second".to_vec()).unwrap();
+    }
+
+    let n2 = RaftNode::with_persistence(1, vec![], &path).unwrap();
+    assert_eq!(n2.log.last_index(), 2);
+    assert_eq!(n2.log.get(1).unwrap().command, b"first");
+    assert_eq!(n2.log.get(2).unwrap().command, b"second");
+    assert_eq!(n2.log.get(1).unwrap().term, 1);
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn conflicting_append_overwrites_after_restart() {
+    let path = tmp_wal("conflict");
+
+    // First run: log = [1(term1), 2(term1), 3(term1)]
+    {
+        let mut n = RaftNode::with_persistence(2, vec![1, 3], &path).unwrap();
+
+        // Simulate two AppendEntries from a leader in term 1.
+
+
+        let req = AppendEntries {
+            term: 1,
+            leader_id: 1,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![
+                LogEntry { term: 1, index: 1, command: vec![1] },
+                LogEntry { term: 1, index: 2, command: vec![2] },
+                LogEntry { term: 1, index: 3, command: vec![3] },
+            ],
+            leader_commit: 0,
+        };
+        let reply = n.handle_append_entries(req);
+        assert!(reply.success);
+        assert_eq!(n.log.last_index(), 3);
+    }
+
+    // Second run: conflicting append at index 2 with term 2
+    {
+        let mut n = RaftNode::with_persistence(2, vec![1, 3], &path).unwrap();
+        assert_eq!(n.log.last_index(), 3);
+        assert_eq!(n.log.term_at(2), 1);
+
+        let req = AppendEntries {
+            term: 2,
+            leader_id: 1,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![
+                LogEntry { term: 2, index: 2, command: vec![20] },
+                LogEntry { term: 2, index: 3, command: vec![30] },
+            ],
+            leader_commit: 0,
+        };
+        let reply = n.handle_append_entries(req);
+        assert!(reply.success);
+        assert_eq!(n.log.last_index(), 3);
+        assert_eq!(n.log.term_at(2), 2);
+        assert_eq!(n.log.term_at(3), 2);
+        assert_eq!(n.log.get(2).unwrap().command, vec![20]);
+        assert_eq!(n.log.get(3).unwrap().command, vec![30]);
+    }
+
+    // Third run: verify the conflicting state survived
+    {
+        let n = RaftNode::with_persistence(2, vec![1, 3], &path).unwrap();
+        assert_eq!(n.log.last_index(), 3);
+        assert_eq!(n.log.term_at(2), 2);
+        assert_eq!(n.log.get(2).unwrap().command, vec![20]);
+    }
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn empty_wal_starts_clean() {
+    let path = tmp_wal("empty");
+    let n = RaftNode::with_persistence(1, vec![2, 3], &path).unwrap();
+    assert_eq!(n.current_term, 0);
+    assert_eq!(n.voted_for, None);
+    assert_eq!(n.log.last_index(), 0);
+    std::fs::remove_file(&path).ok();
+}
