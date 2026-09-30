@@ -55,7 +55,9 @@ impl RaftNode {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             votes_received: HashSet::new(),
-            election_deadline: now,
+            // Randomize the first deadline so simultaneous starts don't
+            // all trigger elections at once.
+            election_deadline: crate::timer::reset_election_deadline(),
             last_heartbeat: now,
             outbox: Vec::new(),
         }

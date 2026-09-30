@@ -212,12 +212,13 @@ impl RaftNode {
     }
 
     /// Advance `commit_index` if a majority has replicated a newer entry.
-    ///
-    /// Only entries from the current term may be committed directly
-    /// (Raft §5.4.2) — committing older-term entries directly can lead
-    /// to a committed entry being rolled back.
     fn advance_commit_index(&mut self) {
+        let old_commit = self.commit_index;
+
         for idx in (self.commit_index + 1)..=self.log.last_index() {
+            // Only entries from the current term may be committed directly
+            // (Raft §5.4.2) — committing older-term entries directly can lead
+            // to a committed entry being rolled back.
             if self.log.term_at(idx) != self.current_term {
                 continue;
             }
@@ -232,6 +233,12 @@ impl RaftNode {
             if replicated >= self.majority() {
                 self.commit_index = idx;
             }
+        }
+
+        if self.commit_index > old_commit {
+            // Propagate the new commit_index immediately so followers don't
+            // have to wait for the next periodic heartbeat.
+            self.send_heartbeat();
         }
 
         self.apply_committed();

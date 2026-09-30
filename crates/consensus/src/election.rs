@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-
+use std::time::Instant;
 use crate::rpc::{RequestVote, RequestVoteReply};
 use crate::state::{NodeState, OutgoingMessage, RaftNode};
 use crate::timer::reset_election_deadline;
@@ -102,11 +102,13 @@ impl RaftNode {
             self.match_index.insert(peer, 0);
         }
 
+        self.last_heartbeat = Instant::now();
+
         tracing::info!(
-            node = self.id,
-            term = self.current_term,
-            "became leader"
-        );
+        node = self.id,
+        term = self.current_term,
+        "became leader"
+    );
 
         self.send_heartbeat();
     }
