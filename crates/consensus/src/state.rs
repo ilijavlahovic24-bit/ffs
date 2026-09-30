@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Instant;
-
+use common::error::FfsError;
 use crate::log::RaftLog;
+use crate::LogEntry;
 use crate::rpc::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply};
-
+use crate::persistence::{RaftPersistence, RaftRecord};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeState {
     Follower,
@@ -38,6 +40,8 @@ pub struct RaftNode {
     pub last_heartbeat: Instant,
 
     outbox: Vec<OutgoingMessage>,
+    /// WAL for durable state. `None` in tests and in single-shot nodes.
+    persistence: Option<RaftPersistence>,
 }
 
 impl RaftNode {
@@ -55,11 +59,10 @@ impl RaftNode {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             votes_received: HashSet::new(),
-            // Randomize the first deadline so simultaneous starts don't
-            // all trigger elections at once.
             election_deadline: crate::timer::reset_election_deadline(),
             last_heartbeat: now,
             outbox: Vec::new(),
+            persistence: None,
         }
     }
 
@@ -84,9 +87,105 @@ impl RaftNode {
             self.current_term = term;
             self.voted_for = None;
             self.state = NodeState::Follower;
+            self.persist_hard_state();
             true
         } else {
             false
+        }
+    }
+    pub fn with_persistence(
+        id: u64,
+        peers: Vec<u64>,
+        wal_path: &Path,
+    ) -> Result<Self, FfsError> {
+        let mut node = Self::new(id, peers);
+
+        let records = RaftPersistence::read_all(wal_path)?;
+        if !records.is_empty() {
+            tracing::info!(
+                node = id,
+                count = records.len(),
+                "raft wal: replaying records"
+            );
+        }
+        node.replay(records);
+
+        node.persistence = Some(RaftPersistence::open(wal_path)?);
+        Ok(node)
+    }
+    fn replay(&mut self, records: Vec<RaftRecord>) {
+        for record in records {
+            match record {
+                RaftRecord::HardState { term, voted_for } => {
+                    // Only adopt forward-moving terms. A stale record should
+                    // never bring us back to an earlier term.
+                    if term >= self.current_term {
+                        self.current_term = term;
+                        self.voted_for = voted_for;
+                    }
+                }
+                RaftRecord::AppendEntry { entry } => {
+                    self.apply_append_record(entry);
+                }
+            }
+        }
+    }
+    /// Apply one `AppendEntry` record during replay.
+    ///
+    /// Matches the in-memory semantics of `handle_append_entries`:
+    /// overwrite at `entry.index` if the term differs, no-op if it's an
+    /// exact duplicate.
+    fn apply_append_record(&mut self, entry: LogEntry) {
+        let last = self.log.last_index();
+
+        if entry.index <= last {
+            if self.log.term_at(entry.index) == entry.term {
+                // Exact duplicate — idempotent.
+                return;
+            }
+            // Conflicting term — truncate from this index.
+            self.log.truncate_from(entry.index);
+        }
+
+        if entry.index == self.log.last_index() + 1 {
+            self.log.append(entry);
+        } else {
+            tracing::error!(
+                node = self.id,
+                index = entry.index,
+                last_index = self.log.last_index(),
+                "raft wal replay: gap in log — record skipped"
+            );
+        }
+    }
+
+    /// Persist `current_term` and `voted_for`. No-op if no WAL is attached.
+    ///
+    /// Errors are logged but not propagated — a broken WAL is a fatal
+    /// condition that will surface via a different path.
+    pub(crate) fn persist_hard_state(&mut self) {
+        let Some(p) = self.persistence.as_mut() else {
+            return;
+        };
+        let record = RaftRecord::HardState {
+            term: self.current_term,
+            voted_for: self.voted_for,
+        };
+        if let Err(e) = p.append(&record) {
+            tracing::error!(node = self.id, "persist hard state failed: {e}");
+        }
+    }
+
+    /// Persist one appended log entry. No-op if no WAL is attached.
+    pub(crate) fn persist_append(&mut self, entry: &LogEntry) {
+        let Some(p) = self.persistence.as_mut() else {
+            return;
+        };
+        let record = RaftRecord::AppendEntry {
+            entry: entry.clone(),
+        };
+        if let Err(e) = p.append(&record) {
+            tracing::error!(node = self.id, "persist append failed: {e}");
         }
     }
 }
