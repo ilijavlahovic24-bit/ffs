@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::log::LogEntry;
 use crate::rpc::{AppendEntries, AppendEntriesReply};
 use crate::state::{NodeState, OutgoingMessage, RaftNode};
@@ -20,6 +22,9 @@ impl RaftNode {
             self.current_term = req.term;
             self.voted_for = None;
             self.state = NodeState::Follower;
+            // Durability: the new term and the cleared vote must be on
+            // disk before we acknowledge anything.
+            self.persist_hard_state();
         }
 
         // Stale leader from an old term — reject.
@@ -80,6 +85,11 @@ impl RaftNode {
                 None => {}
             }
             self.log.append(entry.clone());
+
+            // Durability: each appended entry must be on disk before we
+            // acknowledge. A crash between here and the reply will cause
+            // the leader to re-send — which is fine (idempotent).
+            self.persist_append(entry);
         }
 
         // Advance commit_index if the leader has committed further.
@@ -102,6 +112,7 @@ impl RaftNode {
             self.current_term = reply.term;
             self.voted_for = None;
             self.state = NodeState::Follower;
+            self.persist_hard_state();
             return;
         }
 
@@ -144,9 +155,9 @@ impl RaftNode {
 
     /// Send everything the peer is missing, starting at `next_index[peer]`.
     ///
-    /// This is both the heartbeat and the replication primitive — if
-    /// there are no new entries, the AppendEntries carries an empty
-    /// `entries` vector.
+    /// This is both the heartbeat and the replication primitive — if there
+    /// are no new entries, the AppendEntries carries an empty `entries`
+    /// vector.
     pub fn replicate_to(&mut self, peer: u64) {
         if self.state != NodeState::Leader {
             return;
@@ -189,13 +200,21 @@ impl RaftNode {
             return None;
         }
 
+        // Build the entry with the correct index up front so we can
+        // persist exactly what we append.
+        let index = self.log.last_index() + 1;
         let entry = LogEntry {
             term: self.current_term,
-            index: 0, // RaftLog::append will overwrite this
+            index,
             command,
         };
-        self.log.append(entry);
-        let index = self.log.last_index();
+
+        self.log.append(entry.clone());
+
+        // Durability: the leader must persist its own entry before
+        // replicating. Otherwise a crash could lose the entry from the
+        // leader's log while followers still hold it.
+        self.persist_append(&entry);
 
         // Replicate to all followers.
         for &peer in &self.peers.clone() {
@@ -212,13 +231,14 @@ impl RaftNode {
     }
 
     /// Advance `commit_index` if a majority has replicated a newer entry.
+    ///
+    /// Only entries from the current term may be committed directly
+    /// (Raft §5.4.2) — committing older-term entries directly can lead
+    /// to a committed entry being rolled back.
     fn advance_commit_index(&mut self) {
         let old_commit = self.commit_index;
 
         for idx in (self.commit_index + 1)..=self.log.last_index() {
-            // Only entries from the current term may be committed directly
-            // (Raft §5.4.2) — committing older-term entries directly can lead
-            // to a committed entry being rolled back.
             if self.log.term_at(idx) != self.current_term {
                 continue;
             }
@@ -236,8 +256,8 @@ impl RaftNode {
         }
 
         if self.commit_index > old_commit {
-            // Propagate the new commit_index immediately so followers don't
-            // have to wait for the next periodic heartbeat.
+            // Propagate the new commit_index immediately so followers
+            // don't have to wait for the next periodic heartbeat.
             self.send_heartbeat();
         }
 
@@ -399,7 +419,6 @@ mod tests {
 
     #[test]
     fn leader_does_not_commit_without_majority() {
-        // Fresh leader with one proposal and zero replies — no commit.
         let mut l = leader(1, vec![2, 3]);
         l.propose(vec![7]).unwrap();
         assert_eq!(l.commit_index, 0);

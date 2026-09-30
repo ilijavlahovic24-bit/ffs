@@ -14,6 +14,10 @@ impl RaftNode {
         self.votes_received.insert(self.id);
         self.election_deadline = reset_election_deadline();
 
+        // Durability: `current_term` and `voted_for` must be on disk
+        // before we ask anyone to vote for us.
+        self.persist_hard_state();
+
         tracing::info!(
             node = self.id,
             term = self.current_term,
@@ -36,10 +40,13 @@ impl RaftNode {
     }
 
     pub fn handle_request_vote(&mut self, req: RequestVote) -> RequestVoteReply {
+        let mut dirty = false;
+
         if req.term > self.current_term {
             self.current_term = req.term;
             self.voted_for = None;
             self.state = NodeState::Follower;
+            dirty = true;
         }
 
         let mut granted = false;
@@ -60,7 +67,15 @@ impl RaftNode {
                 self.voted_for = Some(req.candidate_id);
                 self.election_deadline = reset_election_deadline();
                 granted = true;
+                dirty = true;
             }
+        }
+
+        if dirty {
+            // Durability: before we tell the candidate "yes", the vote
+            // must be on disk. Otherwise a crash could let us vote again
+            // in the same term for a different candidate.
+            self.persist_hard_state();
         }
 
         RequestVoteReply {
@@ -105,10 +120,10 @@ impl RaftNode {
         self.last_heartbeat = Instant::now();
 
         tracing::info!(
-        node = self.id,
-        term = self.current_term,
-        "became leader"
-    );
+            node = self.id,
+            term = self.current_term,
+            "became leader"
+        );
 
         self.send_heartbeat();
     }
