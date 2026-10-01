@@ -1,6 +1,7 @@
 pub mod election;
 pub mod log;
 pub mod persistence;
+pub mod proposal;
 pub mod replication;
 pub mod rpc;
 pub mod state;

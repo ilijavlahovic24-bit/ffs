@@ -20,3 +20,4 @@ meta = { path = "../meta" }
 network = { path = "../network" }
 storage = { path = "../storage" }
 vfs = { path = "../vfs" }
+bincode = "2.0.1"

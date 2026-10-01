@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use crate::log::LogEntry;
 use crate::rpc::{AppendEntries, AppendEntriesReply};
 use crate::state::{NodeState, OutgoingMessage, RaftNode};
@@ -18,13 +16,10 @@ impl RaftNode {
     ///    `min(leader_commit, index of last new entry)`.
     pub fn handle_append_entries(&mut self, req: AppendEntries) -> AppendEntriesReply {
         // If the leader's term is higher, adopt it and step down.
+        // step_down also fails any pending proposals and persists
+        // the new hard state.
         if req.term > self.current_term {
-            self.current_term = req.term;
-            self.voted_for = None;
-            self.state = NodeState::Follower;
-            // Durability: the new term and the cleared vote must be on
-            // disk before we acknowledge anything.
-            self.persist_hard_state();
+            self.step_down(req.term);
         }
 
         // Stale leader from an old term — reject.
@@ -108,11 +103,9 @@ impl RaftNode {
     /// Handle a reply to an AppendEntries we (as leader) sent.
     pub fn handle_append_entries_reply(&mut self, from: u64, reply: AppendEntriesReply) {
         // Reply from a newer term — we are stale, step down.
+        // step_down also fails all our pending proposals.
         if reply.term > self.current_term {
-            self.current_term = reply.term;
-            self.voted_for = None;
-            self.state = NodeState::Follower;
-            self.persist_hard_state();
+            self.step_down(reply.term);
             return;
         }
 
@@ -195,6 +188,9 @@ impl RaftNode {
     ///
     /// Returns the log index the command was appended at, or `None` if
     /// this node is not the leader.
+    ///
+    /// This does NOT wait for commit — the caller that wants to await
+    /// commit should use `propose_with_waiter` in `proposal.rs`.
     pub fn propose(&mut self, command: Vec<u8>) -> Option<u64> {
         if self.state != NodeState::Leader {
             return None;
@@ -266,19 +262,52 @@ impl RaftNode {
 
     /// Apply all committed entries from `last_applied + 1` to `commit_index`.
     ///
-    /// In Phase 6 this will call into the state machine (MetaStore).
+    /// For each committed entry:
+    /// - Decode and apply it via the state machine (if any).
+    /// - Resolve any client proposal waiter for that index.
+    ///
+    /// Empty commands are treated as Raft no-ops and skipped, but their
+    /// waiters (if any) still get resolved.
     fn apply_committed(&mut self) {
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
-            if let Some(entry) = self.log.get(self.last_applied) {
+            let idx = self.last_applied;
+
+            // Grab the command bytes — we need them for the state machine.
+            let Some(entry) = self.log.get(idx) else {
+                // Should not happen; log entries are dense.
+                tracing::warn!(node = self.id, index = idx, "missing log entry to apply");
+                continue;
+            };
+            let command = entry.command.clone();
+            let term = entry.term;
+
+            // Apply to the state machine. Errors are logged and reported
+            // to the client, but do not stop application — the next entry
+            // must still be applied.
+            let result = match &self.state_machine {
+                Some(sm) => sm.apply(&command),
+                None => Ok(()),
+            };
+
+            if let Err(e) = &result {
+                tracing::error!(
+                    node = self.id,
+                    index = idx,
+                    term,
+                    "state machine apply failed: {e}"
+                );
+            } else {
                 tracing::debug!(
                     node = self.id,
-                    index = entry.index,
-                    term = entry.term,
-                    "applying committed entry"
+                    index = idx,
+                    term,
+                    "applied committed entry"
                 );
-                // Phase 6: invoke MetaStore::apply(entry)
             }
+
+            // Resolve the client waiter (if any) for this index.
+            self.resolve_proposal(idx, result);
         }
     }
 }
@@ -408,7 +437,7 @@ mod tests {
         // Only self has it so far.
         assert_eq!(l.commit_index, 0);
 
-        // Vote from peer 2 pushes us to majority (2 of 3).
+        // Reply from peer 2 pushes us to majority (2 of 3).
         l.handle_append_entries_reply(2, AppendEntriesReply {
             term: 1,
             success: true,

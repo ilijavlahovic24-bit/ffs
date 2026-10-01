@@ -124,7 +124,6 @@ async fn elects_single_leader_in_three_node_cluster() {
         }
     }
 }
-
 #[tokio::test]
 async fn leader_replicates_entry_to_followers() {
     let mut cluster = Cluster::new(&[1, 2, 3]);
@@ -133,41 +132,43 @@ async fn leader_replicates_entry_to_followers() {
         .await
         .expect("no leader");
 
-    // Propose a command.
+    // Propose a command. The index is not necessarily 1 — becoming
+    // leader auto-proposes a no-op entry (Raft §8), which occupies
+    // index 1. We just record whatever index we got.
     let idx = cluster
         .nodes
         .get_mut(&leader_id)
         .unwrap()
         .propose(b"hello".to_vec())
         .expect("leader should accept proposal");
-    assert_eq!(idx, 1);
+    assert!(idx >= 1);
 
     // Deliver everything, tick a few times so heartbeat carries commit_index.
-    for _ in 0..5 {
+    for _ in 0..20 {
         cluster.deliver_all();
         cluster.tick_all();
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // Every node must have the entry at index 1.
+    // Every node must have the entry at `idx` with our command.
     for (&id, node) in &cluster.nodes {
         let entry = node
             .log
-            .get(1)
-            .unwrap_or_else(|| panic!("node {id} missing log entry at index 1"));
+            .get(idx)
+            .unwrap_or_else(|| panic!("node {id} missing log entry at index {idx}"));
         assert_eq!(entry.command, b"hello");
     }
 
-    // Every node must have advanced commit_index to at least 1.
+    // Every node must have advanced commit_index to at least `idx`.
     for (&id, node) in &cluster.nodes {
         assert!(
-            node.commit_index >= 1,
-            "node {id} commit_index = {}",
+            node.commit_index >= idx,
+            "node {id} commit_index = {}, expected >= {idx}",
             node.commit_index
         );
         assert!(
-            node.last_applied >= 1,
-            "node {id} last_applied = {}",
+            node.last_applied >= idx,
+            "node {id} last_applied = {}, expected >= {idx}",
             node.last_applied
         );
     }

@@ -1,11 +1,13 @@
 [package]
-name    = "meta"
+name = "meta"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-common  = { path = "../common" }
-tokio   = { workspace = true }
-serde   = { workspace = true }
-tracing = { workspace = true }
-sled    = "0.34"
+common    = { path = "../common" }
+consensus = { path = "../consensus" }
+storage   = { path = "../storage" }
+tokio     = { workspace = true }
+tracing   = { workspace = true }
+bincode   = { version = "2", features = ["serde"] }
+dashmap   = "5"

@@ -11,6 +11,7 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/vfs/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/consensus/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/network/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

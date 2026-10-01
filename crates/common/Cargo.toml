@@ -9,3 +9,4 @@ thiserror = { workspace = true }
 serde     = { workspace = true }
 tracing   = { workspace = true }
 dashmap = "7.0.0-rc2"
+tokio = "1.50.0"

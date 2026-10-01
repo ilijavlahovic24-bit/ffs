@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::oneshot;
 use common::error::FfsError;
+use common::StateMachine;
 use crate::log::RaftLog;
 use crate::LogEntry;
 use crate::rpc::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply};
@@ -42,6 +45,12 @@ pub struct RaftNode {
     outbox: Vec<OutgoingMessage>,
     /// WAL for durable state. `None` in tests and in single-shot nodes.
     persistence: Option<RaftPersistence>,
+    /// Optional state machine that receives committed commands.
+    pub(crate) state_machine: Option<Arc<dyn StateMachine>>,
+
+    /// Pending client proposals waiting for commit.
+    /// Key is the log index, value is the channel to signal on commit.
+    pub(crate) pending_proposals: HashMap<u64, oneshot::Sender<Result<(), FfsError>>>,
 }
 
 impl RaftNode {
@@ -63,6 +72,8 @@ impl RaftNode {
             last_heartbeat: now,
             outbox: Vec::new(),
             persistence: None,
+            state_machine: None,
+            pending_proposals: HashMap::new(),
         }
     }
 
@@ -188,6 +199,28 @@ impl RaftNode {
             tracing::error!(node = self.id, "persist append failed: {e}");
         }
     }
+    pub fn with_state_machine(
+        id: u64,
+        peers: Vec<u64>,
+        wal_path: &Path,
+        state_machine: Arc<dyn StateMachine>,
+    ) -> Result<Self, FfsError> {
+        let mut node = Self::with_persistence(id, peers, wal_path)?;
+        node.state_machine = Some(state_machine);
+        Ok(node)
+    }
+    // Step down to Follower in `term`, fail all pending proposals.
+    pub(crate) fn step_down(&mut self, term: u64) {
+        self.current_term = term;
+        self.voted_for = None;
+        self.state = NodeState::Follower;
+        self.fail_all_proposals("leadership lost");
+        self.persist_hard_state();
+    }
+    pub fn is_leader(&self) -> bool {
+        self.state == NodeState::Leader
+    }
+
 }
 
 #[cfg(test)]
