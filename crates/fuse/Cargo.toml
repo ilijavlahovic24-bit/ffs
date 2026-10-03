@@ -4,20 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fuse3 = { version = "0.9.0", features = ["tokio-runtime", "unprivileged"] }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-bytes = "1"
-dashmap = "5"
+common       = { path = "../common" }
+storage      = { path = "../storage" }
+vfs          = { path = "../vfs" }
+meta         = { path = "../meta" }       # samo za InodeManager tip u mount.rs
+consensus    = { path = "../consensus" }  # samo za RaftNode u mount.rs
+fuse3        = { version = "0.9", features = ["tokio-runtime", "unprivileged"] }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { version = "0.3" }
+dashmap      = "5"
+bytes        = "1"
+libc         = "0.2"
 futures-util = "0.3"
-libc = "0.2"
-
-# Project dependencies
-common = { path = "../common" }
-consensus = { path = "../consensus" }
-meta = { path = "../meta" }
-network = { path = "../network" }
-storage = { path = "../storage" }
-vfs = { path = "../vfs" }
-bincode = "2.0.1"

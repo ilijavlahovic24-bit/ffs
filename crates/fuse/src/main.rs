@@ -9,29 +9,19 @@ use fuse::mount::mount;
 async fn main() {
     log_init();
 
-    // CLI: ffs <mount_point> [wal_path] [tmp_dir] [data_dir]
     let mut args = env::args_os().skip(1);
-
     let mount_point = match args.next() {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: ffs <mount_point> [wal_path] [tmp_dir] [data_dir]");
+            eprintln!("usage: ffs <mount_point>");
             std::process::exit(1);
         }
     };
 
-    let wal_path = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/ferumfs.wal"));
-    let tmp_dir = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/ferumfs-tmp"));
-    let data_dir = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/ferumfs-data"));
+    let storage_wal_path = PathBuf::from("/tmp/ferumfs.storage.wal");
+    let raft_wal_path = PathBuf::from("/tmp/ferumfs.raft.wal");
+    let tmp_dir = PathBuf::from("/tmp/ferumfs-tmp");
+    let data_dir = PathBuf::from("/tmp/ferumfs-data");
 
     for d in [&tmp_dir, &data_dir] {
         if let Err(e) = std::fs::create_dir_all(d) {
@@ -40,7 +30,7 @@ async fn main() {
         }
     }
 
-    if let Err(e) = mount(mount_point, wal_path, tmp_dir, data_dir).await {
+    if let Err(e) = mount(mount_point, storage_wal_path, raft_wal_path, tmp_dir, data_dir).await {
         eprintln!("mount failed: {e}");
         std::process::exit(1);
     }

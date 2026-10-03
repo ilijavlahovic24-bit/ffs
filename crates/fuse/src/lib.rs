@@ -1,5 +1,4 @@
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use fuse3::raw::prelude::*;
@@ -7,14 +6,12 @@ use fuse3::raw::Filesystem;
 use fuse3::raw::reply::*;
 use futures_util::Stream;
 
-use common::error::FfsError;
-use storage::wal::{DataPath, MetadataWal};
+use vfs::VfsLayer;
 
 use crate::attr::AttrHandler;
 use crate::dir::DirHandler;
 use crate::file::FileHandler;
 use crate::handles::HandleManager;
-use crate::inode::InodeManager;
 
 pub mod attr;
 pub mod convert;
@@ -22,51 +19,24 @@ pub mod dir;
 pub mod file;
 pub mod handles;
 pub mod helper;
-pub mod inode;
 pub mod mount;
 
 pub struct DistributedFUSE {
-    inode_manager: Arc<InodeManager>,
     handle_manager: Arc<HandleManager>,
     attr_handler: Arc<AttrHandler>,
     dir_handler: Arc<DirHandler>,
     file_handler: Arc<FileHandler>,
-
-    #[allow(dead_code)]
-    wal: Arc<MetadataWal>,
-    #[allow(dead_code)]
-    data_path: Arc<DataPath>,
 }
 
 impl DistributedFUSE {
-    pub async fn new(
-        inode_manager: Arc<InodeManager>,
-        wal_path: PathBuf,
-        tmp_dir: PathBuf,
-        data_dir: PathBuf,
-    ) -> Result<Self, FfsError> {
+    pub fn new(vfs: Arc<VfsLayer>) -> Self {
         let handle_manager = Arc::new(HandleManager::new());
-        let wal = Arc::new(MetadataWal::new(wal_path).await?);
-        let data_path = Arc::new(DataPath::new(tmp_dir, data_dir, wal.clone()).await);
-
-        let attr_handler = Arc::new(AttrHandler::new(inode_manager.clone()));
-        let dir_handler = Arc::new(DirHandler::new(inode_manager.clone(), wal.clone()));
-        let file_handler = Arc::new(FileHandler::new(
-            inode_manager.clone(),
-            handle_manager.clone(),
-            wal.clone(),
-            data_path.clone(),
-        ));
-
-        Ok(Self {
-            inode_manager,
-            handle_manager,
-            attr_handler,
-            dir_handler,
-            file_handler,
-            wal,
-            data_path,
-        })
+        Self {
+            handle_manager: handle_manager.clone(),
+            attr_handler: Arc::new(AttrHandler::new(vfs.clone())),
+            dir_handler: Arc::new(DirHandler::new(vfs.clone())),
+            file_handler: Arc::new(FileHandler::new(vfs, handle_manager)),
+        }
     }
 }
 
@@ -79,12 +49,7 @@ impl Filesystem for DistributedFUSE {
         self.attr_handler.destroy(req).await
     }
 
-    async fn lookup(
-        &self,
-        req: Request,
-        parent: u64,
-        name: &OsStr,
-    ) -> fuse3::Result<ReplyEntry> {
+    async fn lookup(&self, req: Request, parent: u64, name: &OsStr) -> fuse3::Result<ReplyEntry> {
         self.dir_handler.lookup(req, parent, name).await
     }
 
@@ -98,12 +63,7 @@ impl Filesystem for DistributedFUSE {
         self.attr_handler.getattr(req, inode, fh, flags).await
     }
 
-    async fn open(
-        &self,
-        req: Request,
-        inode: u64,
-        flags: u32,
-    ) -> fuse3::Result<ReplyOpen> {
+    async fn open(&self, req: Request, inode: u64, flags: u32) -> fuse3::Result<ReplyOpen> {
         self.file_handler.open(req, inode, flags).await
     }
 
@@ -168,9 +128,7 @@ impl Filesystem for DistributedFUSE {
         mode: u32,
         umask: u32,
     ) -> fuse3::Result<ReplyEntry> {
-        self.dir_handler
-            .mkdir(req, parent, name, mode & !umask)
-            .await
+        self.dir_handler.mkdir(req, parent, name, mode & !umask).await
     }
 
     async fn create(
@@ -181,9 +139,7 @@ impl Filesystem for DistributedFUSE {
         mode: u32,
         flags: u32,
     ) -> fuse3::Result<ReplyCreated> {
-        self.file_handler
-            .create(req, parent, name, mode, flags)
-            .await
+        self.file_handler.create(req, parent, name, mode, flags).await
     }
 
     async fn unlink(

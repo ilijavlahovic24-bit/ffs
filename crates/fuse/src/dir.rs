@@ -1,41 +1,37 @@
 use std::sync::Arc;
-use fuse3::raw::prelude::*;
-use fuse3::Result;
-use fuse3::raw::reply::{ReplyEntry, ReplyDirectory};
-use fuse3::raw::reply::{ReplyDirectoryPlus, DirectoryEntryPlus};
-use futures_util::stream::{self, Stream};
 use std::ffi::OsStr;
-use std::time::{Duration, SystemTime};
-use common::types::{FileType, InodeInfo};
-use storage::wal::{MetadataWal, WalOperation};
+use std::time::Duration;
+
+use fuse3::raw::prelude::*;
+use fuse3::raw::reply::{ReplyEntry, ReplyDirectory, ReplyDirectoryPlus, DirectoryEntryPlus};
+use fuse3::Result;
+use futures_util::stream::{self, Stream};
+
+use common::types::InodeInfo;
+use vfs::VfsLayer;
+
 use crate::convert::to_fuse_type;
 use crate::helper::to_file_attr;
-use crate::inode::InodeManager;
 
 pub struct DirHandler {
-    inode_manager: Arc<InodeManager>,
-    wal: Arc<MetadataWal>,
+    vfs: Arc<VfsLayer>,
 }
 
 impl DirHandler {
-    pub fn new(inode_manager: Arc<InodeManager>, wal: Arc<MetadataWal>) -> Self {
-        Self { inode_manager, wal }
+    pub fn new(vfs: Arc<VfsLayer>) -> Self {
+        Self { vfs }
     }
 
     pub async fn lookup(&self, _req: Request, parent: u64, name: &OsStr) -> Result<ReplyEntry> {
-        let name_str = name.to_string_lossy();
-
-        if let Some(ino) = self.inode_manager.lookup(parent, &name_str) {
-            if let Some(info) = self.inode_manager.get_inode(ino) {
-                return Ok(ReplyEntry {
-                    ttl: Duration::from_secs(1),
-                    attr: to_file_attr(&info),
-                    generation: 0,
-                });
-            }
+        let name = name.to_string_lossy();
+        match self.vfs.lookup(parent, &name) {
+            Ok(info) => Ok(ReplyEntry {
+                ttl: Duration::from_secs(1),
+                attr: to_file_attr(&info),
+                generation: 0,
+            }),
+            Err(_) => Err(libc::ENOENT.into()),
         }
-
-        Err(libc::ENOENT.into())
     }
 
     pub async fn readdir(
@@ -45,7 +41,7 @@ impl DirHandler {
         _fh: u64,
         offset: i64,
     ) -> Result<ReplyDirectory<impl Stream<Item = Result<DirectoryEntry>> + Send + '_>> {
-        let parent = self.get_parent(inode).await;
+        let parent = self.vfs.getattr(inode).map(|i| i.parent).unwrap_or(1);
 
         let mut entries: Vec<Result<DirectoryEntry>> = vec![
             Ok(DirectoryEntry {
@@ -62,7 +58,8 @@ impl DirHandler {
             }),
         ];
 
-        for (i, child) in self.inode_manager.children(inode).iter().enumerate() {
+        let children = self.vfs.readdir(inode).unwrap_or_default();
+        for (i, child) in children.iter().enumerate() {
             entries.push(Ok(DirectoryEntry {
                 inode: child.ino,
                 kind: to_fuse_type(child.kind),
@@ -77,134 +74,24 @@ impl DirHandler {
         })
     }
 
-    async fn get_parent(&self, inode: u64) -> u64 {
-        self.inode_manager
-            .get_inode(inode)
-            .map(|i| i.parent)
-            .unwrap_or(1)
-    }
-
-    pub async fn mkdir(
-        &self,
-        _req: Request,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-    ) -> Result<ReplyEntry> {
-        let name = name.to_string_lossy().to_string();
-
-        if self.inode_manager.lookup(parent, &name).is_some() {
-            return Err(libc::EEXIST.into());
-        }
-
-        let ino = self.inode_manager.alloc_inode();
-        let mode = (mode & 0o7777) as u16;
-
-        self.wal
-            .append(WalOperation::Mkdir {
-                inode_id: ino,
-                parent_id: parent,
-                name: name.clone(),
-                mode,
-            })
-            .await
-            .map_err(|_| libc::EIO)?;
-
-        let info = InodeInfo {
-            ino,
-            parent,
-            name: name.clone(),
-            kind: FileType::Directory,
-            size: 0,
-            mode,
-        };
-        self.inode_manager
-            .add_inode(parent, name, info.clone())
-            .map_err(|_| libc::EIO)?;
-
-        Ok(ReplyEntry {
-            ttl: Duration::from_secs(1),
-            attr: to_file_attr(&info),
-            generation: 0,
-        })
-    }
-
-    pub async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
-        let name_str = name.to_string_lossy().to_string();
-
-        let info = self
-            .inode_manager
-            .lookup(parent, &name_str)
-            .and_then(|ino| self.inode_manager.get_inode(ino))
-            .ok_or(libc::ENOENT)?;
-
-        if info.kind == FileType::Directory {
-            return Err(libc::EISDIR.into());
-        }
-
-        self.wal
-            .append(WalOperation::Unlink {
-                parent_id: parent,
-                name: name_str.clone(),
-            })
-            .await
-            .map_err(|_| libc::EIO)?;
-
-        self.inode_manager
-            .remove_inode(parent, &name_str)
-            .map_err(|_| libc::EIO)?;
-
-        Ok(())
-    }
-
-    pub async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
-        let name_str = name.to_string_lossy().to_string();
-
-        let info = self
-            .inode_manager
-            .lookup(parent, &name_str)
-            .and_then(|ino| self.inode_manager.get_inode(ino))
-            .ok_or(libc::ENOENT)?;
-
-        if info.kind != FileType::Directory {
-            return Err(libc::ENOTDIR.into());
-        }
-
-        if !self.inode_manager.children(info.ino).is_empty() {
-            return Err(libc::ENOTEMPTY.into());
-        }
-
-        self.wal
-            .append(WalOperation::Rmdir {
-                parent_id: parent,
-                name: name_str.clone(),
-            })
-            .await
-            .map_err(|_| libc::EIO)?;
-
-        self.inode_manager
-            .remove_inode(parent, &name_str)
-            .map_err(|_| libc::EIO)?;
-
-        Ok(())
-    }
     pub async fn readdirplus(
         &self,
         _req: Request,
-        inode: u64,
+        parent: u64,
         _fh: u64,
         offset: u64,
         _lock_owner: u64,
-    ) -> Result<ReplyDirectoryPlus<impl Stream<Item = Result<DirectoryEntryPlus>> + Send + '_>> {
-        let parent = self.get_parent(inode).await;
+    ) -> Result<
+        ReplyDirectoryPlus<impl Stream<Item = Result<DirectoryEntryPlus>> + Send + '_>,
+    > {
         let ttl = Duration::from_secs(1);
+        let grandparent = self.vfs.getattr(parent).map(|i| i.parent).unwrap_or(1);
 
         let mut entries: Vec<Result<DirectoryEntryPlus>> = Vec::new();
 
-        // "."
-        if let Some(info) = self.inode_manager.get_inode(inode) {
+        if let Ok(info) = self.vfs.getattr(parent) {
             entries.push(Ok(DirectoryEntryPlus {
-                inode,
+                inode: parent,
                 generation: 0,
                 kind: to_fuse_type(info.kind),
                 name: ".".into(),
@@ -214,11 +101,9 @@ impl DirHandler {
                 attr_ttl: ttl,
             }));
         }
-
-        // ".."
-        if let Some(info) = self.inode_manager.get_inode(parent) {
+        if let Ok(info) = self.vfs.getattr(grandparent) {
             entries.push(Ok(DirectoryEntryPlus {
-                inode: parent,
+                inode: grandparent,
                 generation: 0,
                 kind: to_fuse_type(info.kind),
                 name: "..".into(),
@@ -229,8 +114,8 @@ impl DirHandler {
             }));
         }
 
-        // deca
-        for (i, child) in self.inode_manager.children(inode).iter().enumerate() {
+        let children: Vec<InodeInfo> = self.vfs.readdir(parent).unwrap_or_default();
+        for (i, child) in children.iter().enumerate() {
             entries.push(Ok(DirectoryEntryPlus {
                 inode: child.ino,
                 generation: 0,
@@ -247,5 +132,48 @@ impl DirHandler {
         Ok(ReplyDirectoryPlus {
             entries: stream::iter(entries.into_iter().skip(start)),
         })
+    }
+
+    pub async fn mkdir(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+    ) -> Result<ReplyEntry> {
+        let name = name.to_string_lossy().to_string();
+        let mode = (mode & 0o7777) as u16;
+
+        let ino = self
+            .vfs
+            .mkdir(parent, name.clone(), mode)
+            .await
+            .map_err(|e| {
+                tracing::warn!("mkdir failed: {e}");
+                libc::EIO
+            })?;
+
+        let info = self.vfs.getattr(ino).map_err(|_| libc::EIO)?;
+        Ok(ReplyEntry {
+            ttl: Duration::from_secs(1),
+            attr: to_file_attr(&info),
+            generation: 0,
+        })
+    }
+
+    pub async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+        let name = name.to_string_lossy().to_string();
+        self.vfs
+            .unlink(parent, name)
+            .await
+            .map_err(|_| libc::EIO.into())
+    }
+
+    pub async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+        let name = name.to_string_lossy().to_string();
+        self.vfs
+            .rmdir(parent, name)
+            .await
+            .map_err(|_| libc::EIO.into())
     }
 }

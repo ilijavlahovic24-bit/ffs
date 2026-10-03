@@ -268,7 +268,7 @@ impl RaftNode {
     ///
     /// Empty commands are treated as Raft no-ops and skipped, but their
     /// waiters (if any) still get resolved.
-    fn apply_committed(&mut self) {
+    pub(crate) fn apply_committed(&mut self) {
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
             let idx = self.last_applied;

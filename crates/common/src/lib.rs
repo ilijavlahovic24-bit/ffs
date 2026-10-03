@@ -1,12 +1,9 @@
-pub mod types;
+pub mod config;
 pub mod error;
-mod config;
-mod metric;
+pub mod metrics;
 pub mod state_machine;
+pub mod types;
 
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use fuse3::{FileType, Result};
-use types::BlockId;
-use tokio::sync::oneshot;
+pub use error::FfsError;
 pub use state_machine::StateMachine;
+pub use types::*;
