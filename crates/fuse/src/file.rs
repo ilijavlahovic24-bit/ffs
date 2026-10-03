@@ -97,4 +97,14 @@ impl FileHandler {
             flags,
         })
     }
+    pub async fn fsync(
+        &self,
+        _req: Request,
+        _inode: u64,
+        _fh: u64,
+        _datasync: bool,
+    ) -> Result<()> {
+        // Data is fsynced at write time by DataPath::write_blob.
+        Ok(())
+    }
 }

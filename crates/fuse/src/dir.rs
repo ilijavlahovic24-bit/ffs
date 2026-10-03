@@ -176,4 +176,23 @@ impl DirHandler {
             .await
             .map_err(|_| libc::EIO.into())
     }
+    pub async fn rename(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+        new_parent: u64,
+        new_name: &OsStr,
+    ) -> Result<()> {
+        let name = name.to_string_lossy().to_string();
+        let new_name = new_name.to_string_lossy().to_string();
+        self.vfs
+            .rename(parent, name, new_parent, new_name)
+            .await
+            .map_err(|e| {
+                tracing::warn!("rename failed: {e}");
+                libc::EIO
+            })?;
+        Ok(())
+    }
 }

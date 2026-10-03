@@ -159,7 +159,65 @@ impl Filesystem for DistributedFUSE {
     ) -> fuse3::Result<()> {
         self.dir_handler.rmdir(req, parent, name).await
     }
+    async fn setattr(
+        &self,
+        req: Request,
+        inode: u64,
+        fh: Option<u64>,
+        set_attr: SetAttr,
+    ) -> fuse3::Result<ReplyAttr> {
+        self.attr_handler.setattr(req, inode, fh, set_attr).await
+    }
 
+    async fn statfs(
+        &self,
+        req: Request,
+        inode: u64,
+    ) -> fuse3::Result<ReplyStatFs> {
+        self.attr_handler.statfs(req, inode).await
+    }
+
+    async fn rename(
+        &self,
+        req: Request,
+        parent: u64,
+        name: &OsStr,
+        new_parent: u64,
+        new_name: &OsStr,
+    ) -> fuse3::Result<()> {
+        self.dir_handler
+            .rename(req, parent, name, new_parent, new_name)
+            .await
+    }
+
+    async fn fsync(
+        &self,
+        req: Request,
+        inode: u64,
+        fh: u64,
+        datasync: bool,
+    ) -> fuse3::Result<()> {
+        self.file_handler.fsync(req, inode, fh, datasync).await
+    }
+
+    async fn access(
+        &self,
+        _req: Request,
+        _inode: u64,
+        _mask: u32,
+    ) -> fuse3::Result<()> {
+        Ok(())
+    }
+
+    async fn flush(
+        &self,
+        _req: Request,
+        _inode: u64,
+        _fh: u64,
+        _lock_owner: u64,
+    ) -> fuse3::Result<()> {
+        Ok(())
+    }
     async fn release(
         &self,
         _req: Request,
@@ -172,4 +230,5 @@ impl Filesystem for DistributedFUSE {
         self.handle_manager.release_handle(fh);
         Ok(())
     }
+
 }

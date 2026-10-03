@@ -21,6 +21,8 @@ pub enum WalOperation {
     Rmdir  { parent_id: InodeId, name: String },
     Rename { old_parent: InodeId, old_name: String, new_parent: InodeId, new_name: String },
     WriteBlob { inode_id: InodeId },
+    Truncate { inode_id: InodeId, size: u64 },
+    Chmod { inode_id: InodeId, mode: u16 },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WalEntryPayload {

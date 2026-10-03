@@ -76,6 +76,31 @@ impl MetaStore {
         })
             .await
     }
+    pub async fn rename(
+        &self,
+        old_parent: InodeId,
+        old_name: String,
+        new_parent: InodeId,
+        new_name: String,
+    ) -> Result<(), FfsError> {
+        self.propose_and_wait(WalOperation::Rename {
+            old_parent,
+            old_name,
+            new_parent,
+            new_name,
+        })
+            .await
+    }
+
+    pub async fn truncate(&self, ino: InodeId, size: u64) -> Result<(), FfsError> {
+        self.propose_and_wait(WalOperation::Truncate { inode_id: ino, size })
+            .await
+    }
+
+    pub async fn chmod(&self, ino: InodeId, mode: u16) -> Result<(), FfsError> {
+        self.propose_and_wait(WalOperation::Chmod { inode_id: ino, mode })
+            .await
+    }
 
     async fn propose_and_wait(&self, op: WalOperation) -> Result<(), FfsError> {
         let bytes = bincode::serde::encode_to_vec(&op, BINCODE)

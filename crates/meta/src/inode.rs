@@ -82,6 +82,63 @@ impl InodeManager {
             .filter_map(|e| self.inodes.get(e.value()).map(|i| i.clone()))
             .collect()
     }
+    /// Update inode size. Called from VFS after a blob write.
+    pub fn update_size(&self, ino: InodeId, size: u64) {
+        if let Some(mut info) = self.inodes.get_mut(&ino) {
+            info.size = size;
+        }
+    }
+
+    /// Rename an entry. Fails if `new_name` already exists in `new_parent`.
+    pub fn rename(
+        &self,
+        old_parent: InodeId,
+        old_name: &str,
+        new_parent: InodeId,
+        new_name: &str,
+    ) -> Result<(), FfsError> {
+        let ino = self
+            .lookup(old_parent, old_name)
+            .ok_or(FfsError::NotFound(old_parent))?;
+
+        if self
+            .name_to_inode
+            .contains_key(&(new_parent, new_name.to_string()))
+        {
+            return Err(FfsError::AlreadyExists(new_name.to_string()));
+        }
+
+        self.name_to_inode
+            .remove(&(old_parent, old_name.to_string()));
+        self.name_to_inode
+            .insert((new_parent, new_name.to_string()), ino);
+
+        if let Some(mut info) = self.inodes.get_mut(&ino) {
+            info.parent = new_parent;
+            info.name = new_name.to_string();
+        }
+        Ok(())
+    }
+
+    /// Truncate an inode to `size`.
+    pub fn truncate(&self, ino: InodeId, size: u64) -> Result<(), FfsError> {
+        let mut info = self
+            .inodes
+            .get_mut(&ino)
+            .ok_or(FfsError::NotFound(ino))?;
+        info.size = size;
+        Ok(())
+    }
+
+    /// Change mode bits.
+    pub fn chmod(&self, ino: InodeId, mode: u16) -> Result<(), FfsError> {
+        let mut info = self
+            .inodes
+            .get_mut(&ino)
+            .ok_or(FfsError::NotFound(ino))?;
+        info.mode = mode;
+        Ok(())
+    }
 }
 
 impl StateMachine for InodeManager {
@@ -130,13 +187,28 @@ impl StateMachine for InodeManager {
                     Err(e) => Err(e),
                 }
             }
-            WalOperation::Rename { .. } | WalOperation::WriteBlob { .. } => Ok(()),
+            WalOperation::Rename { old_parent, old_name, new_parent, new_name } => {
+                match self.rename(old_parent, &old_name, new_parent, &new_name) {
+                    Ok(()) | Err(FfsError::NotFound(_)) | Err(FfsError::AlreadyExists(_)) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+            WalOperation::Truncate { inode_id, size } => {
+                let _ = self.truncate(inode_id, size);
+                Ok(())
+            }
+            WalOperation::Chmod { inode_id, mode } => {
+                let _ = self.chmod(inode_id, mode);
+                Ok(())
+            }
+            WalOperation::WriteBlob { .. } => Ok(()),
         }
     }
 
     fn alloc_inode_id(&self) -> u64 {
         self.alloc_inode()
     }
+
 }
 
 impl ApplyWalEntry for InodeManager {
@@ -170,7 +242,22 @@ impl ApplyWalEntry for InodeManager {
                     Err(e) => Err(e),
                 }
             }
-            WalOperation::Rename { .. } | WalOperation::WriteBlob { .. } => Ok(()),
+            WalOperation::Rename { old_parent, old_name, new_parent, new_name } => {
+                match self.rename(old_parent, &old_name, new_parent, &new_name) {
+                    Ok(()) | Err(FfsError::NotFound(_)) | Err(FfsError::AlreadyExists(_)) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+            WalOperation::Truncate { inode_id, size } => {
+                let _ = self.truncate(inode_id, size);
+                Ok(())
+            }
+            WalOperation::Chmod { inode_id, mode } => {
+                let _ = self.chmod(inode_id, mode);
+                Ok(())
+            }
+            WalOperation::WriteBlob { .. } => Ok(()),
         }
     }
+
 }
