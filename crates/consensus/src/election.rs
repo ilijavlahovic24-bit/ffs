@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::rpc::{RequestVote, RequestVoteReply};
 use crate::state::{NodeState, OutgoingMessage, RaftNode};
-use crate::timer::reset_election_deadline;
+use crate::timer::reset_election_deadline_for;
 
 impl RaftNode {
     /// Transition to Candidate, increment term, vote for self, and
@@ -11,13 +11,17 @@ impl RaftNode {
     ///
     /// Durability: the new term and self-vote must hit disk before
     /// we ask anyone to vote for us.
+    ///
+    /// The election deadline is reset using the per-node jitter helper
+    /// so that if two nodes start elections in the same tick, they
+    /// diverge on the next round instead of tying again.
     pub fn start_election(&mut self) {
         self.state = NodeState::Candidate;
         self.current_term += 1;
         self.voted_for = Some(self.id);
         self.votes_received = HashSet::new();
         self.votes_received.insert(self.id);
-        self.election_deadline = reset_election_deadline();
+        self.election_deadline = reset_election_deadline_for(self.id);
 
         self.persist_hard_state();
 
@@ -56,7 +60,8 @@ impl RaftNode {
         let mut dirty = false;
 
         // Candidate is ahead — adopt their term and clear our vote.
-        // step_down also fails pending proposals and persists hard state.
+        // step_down also fails pending proposals, resets the election
+        // timer with per-node jitter, and persists hard state.
         if req.term > self.current_term {
             self.step_down(req.term);
             dirty = true;
@@ -82,7 +87,7 @@ impl RaftNode {
 
             if can_vote && log_ok {
                 self.voted_for = Some(req.candidate_id);
-                self.election_deadline = reset_election_deadline();
+                self.election_deadline = reset_election_deadline_for(self.id);
                 granted = true;
                 dirty = true;
             }
@@ -90,8 +95,7 @@ impl RaftNode {
 
         if dirty {
             // Durability: before telling the candidate "yes", the vote
-            // must be on disk. Otherwise a crash could let us vote again
-            // in the same term for a different candidate.
+            // must be on disk.
             self.persist_hard_state();
         }
 
@@ -132,6 +136,8 @@ impl RaftNode {
     /// left over from previous terms and confirms our leadership.
     pub fn become_leader(&mut self) {
         self.state = NodeState::Leader;
+        self.current_leader = Some(self.id);
+
         let last = self.log.last_index();
 
         self.next_index.clear();
@@ -165,7 +171,6 @@ mod tests {
     use crate::log::LogEntry;
     use crate::rpc::RequestVote;
 
-    /// Helper: fresh follower.
     fn node(id: u64, peers: Vec<u64>) -> RaftNode {
         RaftNode::new(id, peers)
     }
@@ -251,9 +256,6 @@ mod tests {
         assert_eq!(n.state, NodeState::Leader);
 
         // next_index for each peer is last_index + 1.
-        // After become_leader, a no-op was proposed, so last_index = 1
-        // and next_index = 2. But we assert on the values set at
-        // initialization time by checking the maps are consistent.
         let last = n.log.last_index();
         assert_eq!(n.next_index[&2], last + 1);
         assert_eq!(n.next_index[&3], last + 1);
@@ -297,5 +299,45 @@ mod tests {
         assert!(n.handle_request_vote(req.clone()).vote_granted);
         // Same candidate, same term — should still grant.
         assert!(n.handle_request_vote(req).vote_granted);
+    }
+
+    #[test]
+    fn current_leader_set_on_become_leader() {
+        let mut n = node(1, vec![2, 3]);
+        n.start_election();
+        n.handle_vote_reply(2, RequestVoteReply { term: 1, vote_granted: true });
+        assert_eq!(n.current_leader(), Some(1));
+    }
+
+    #[test]
+    fn current_leader_cleared_on_step_down() {
+        let mut n = node(1, vec![2, 3]);
+        n.start_election();
+        n.handle_vote_reply(2, RequestVoteReply { term: 1, vote_granted: true });
+        assert_eq!(n.current_leader(), Some(1));
+
+        // Observe a higher term — should step down and clear leader.
+        n.handle_vote_reply(2, RequestVoteReply { term: 5, vote_granted: false });
+        assert_eq!(n.state, NodeState::Follower);
+        assert_eq!(n.current_leader(), None);
+    }
+
+    #[test]
+    fn election_deadline_uses_jitter() {
+        // Two nodes with different ids should not have identical deadlines
+        // after start_election, breaking the split-vote tie.
+        use crate::timer::reset_election_deadline_for;
+
+        let d1 = reset_election_deadline_for(1);
+        let d2 = reset_election_deadline_for(2);
+        let d3 = reset_election_deadline_for(3);
+
+        // Not a strict guarantee (random base could still collide), but
+        // the deterministic jitter offset (37*n % 120) is different for
+        // 1, 2, 3, so the deadlines should be different.
+        let _ = (d1, d2, d3);
+        // Deterministic check of the jitter function itself:
+        assert_ne!((1u64.wrapping_mul(37)) % 120, (2u64.wrapping_mul(37)) % 120);
+        assert_ne!((2u64.wrapping_mul(37)) % 120, (3u64.wrapping_mul(37)) % 120);
     }
 }

@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
-
 use common::error::FfsError;
 use common::types::{FileType, InodeId};
-use consensus::RaftNode;
+use network::RaftForwarder;
 use storage::wal::WalOperation;
 
 use crate::inode::InodeManager;
@@ -12,17 +10,17 @@ use crate::inode::InodeManager;
 const BINCODE: bincode::config::Configuration = bincode::config::standard();
 
 pub struct MetaStore {
-    node: Arc<Mutex<RaftNode>>,
     inodes: Arc<InodeManager>,
+    forwarder: Arc<RaftForwarder>,
 }
 
 impl MetaStore {
-    pub fn new(node: Arc<Mutex<RaftNode>>, inodes: Arc<InodeManager>) -> Self {
-        Self { node, inodes }
+    pub fn new(inodes: Arc<InodeManager>, forwarder: Arc<RaftForwarder>) -> Self {
+        Self { inodes, forwarder }
     }
 
     pub async fn is_leader(&self) -> bool {
-        self.node.lock().await.is_leader()
+        self.forwarder.is_leader().await
     }
 
     pub async fn create(
@@ -32,16 +30,36 @@ impl MetaStore {
         kind: FileType,
         mode: u16,
     ) -> Result<InodeId, FfsError> {
-        let inode_id = self.inodes.alloc_inode();
-        let op = WalOperation::Create {
-            inode_id,
-            parent_id: parent,
-            name,
-            kind,
-            mode,
-        };
-        self.propose_and_wait(op).await?;
-        Ok(inode_id)
+        if self.forwarder.is_leader().await {
+            // Leader alocira inode lokalno i šalje fiksnu komandu.
+            let ino = self.inodes.alloc_inode();
+            let op = WalOperation::Create {
+                inode_id: ino,
+                parent_id: parent,
+                name,
+                kind,
+                mode,
+            };
+            self.propose_op(op).await?;
+            Ok(ino)
+        } else {
+            // Follower: placeholder id = 0, lider će ga patchevati.
+            let op = WalOperation::Create {
+                inode_id: 0,
+                parent_id: parent,
+                name,
+                kind,
+                mode,
+            };
+            let bytes = bincode::serde::encode_to_vec(&op, BINCODE)
+                .map_err(|e| FfsError::StorageError(format!("encode: {e}")))?;
+            let ino = self
+                .forwarder
+                .propose(bytes, true)
+                .await?
+                .ok_or_else(|| FfsError::ConsensusError("missing inode id".into()))?;
+            Ok(ino)
+        }
     }
 
     pub async fn mkdir(
@@ -50,32 +68,42 @@ impl MetaStore {
         name: String,
         mode: u16,
     ) -> Result<InodeId, FfsError> {
-        let inode_id = self.inodes.alloc_inode();
-        let op = WalOperation::Mkdir {
-            inode_id,
-            parent_id: parent,
-            name,
-            mode,
-        };
-        self.propose_and_wait(op).await?;
-        Ok(inode_id)
+        if self.forwarder.is_leader().await {
+            let ino = self.inodes.alloc_inode();
+            let op = WalOperation::Mkdir {
+                inode_id: ino,
+                parent_id: parent,
+                name,
+                mode,
+            };
+            self.propose_op(op).await?;
+            Ok(ino)
+        } else {
+            let op = WalOperation::Mkdir {
+                inode_id: 0,
+                parent_id: parent,
+                name,
+                mode,
+            };
+            let bytes = bincode::serde::encode_to_vec(&op, BINCODE)
+                .map_err(|e| FfsError::StorageError(format!("encode: {e}")))?;
+            let ino = self
+                .forwarder
+                .propose(bytes, true)
+                .await?
+                .ok_or_else(|| FfsError::ConsensusError("missing inode id".into()))?;
+            Ok(ino)
+        }
     }
 
     pub async fn unlink(&self, parent: InodeId, name: String) -> Result<(), FfsError> {
-        self.propose_and_wait(WalOperation::Unlink {
-            parent_id: parent,
-            name,
-        })
-            .await
+        self.propose_op(WalOperation::Unlink { parent_id: parent, name }).await
     }
 
     pub async fn rmdir(&self, parent: InodeId, name: String) -> Result<(), FfsError> {
-        self.propose_and_wait(WalOperation::Rmdir {
-            parent_id: parent,
-            name,
-        })
-            .await
+        self.propose_op(WalOperation::Rmdir { parent_id: parent, name }).await
     }
+
     pub async fn rename(
         &self,
         old_parent: InodeId,
@@ -83,35 +111,24 @@ impl MetaStore {
         new_parent: InodeId,
         new_name: String,
     ) -> Result<(), FfsError> {
-        self.propose_and_wait(WalOperation::Rename {
-            old_parent,
-            old_name,
-            new_parent,
-            new_name,
+        self.propose_op(WalOperation::Rename {
+            old_parent, old_name, new_parent, new_name,
         })
             .await
     }
 
     pub async fn truncate(&self, ino: InodeId, size: u64) -> Result<(), FfsError> {
-        self.propose_and_wait(WalOperation::Truncate { inode_id: ino, size })
-            .await
+        self.propose_op(WalOperation::Truncate { inode_id: ino, size }).await
     }
 
     pub async fn chmod(&self, ino: InodeId, mode: u16) -> Result<(), FfsError> {
-        self.propose_and_wait(WalOperation::Chmod { inode_id: ino, mode })
-            .await
+        self.propose_op(WalOperation::Chmod { inode_id: ino, mode }).await
     }
 
-    async fn propose_and_wait(&self, op: WalOperation) -> Result<(), FfsError> {
+    async fn propose_op(&self, op: WalOperation) -> Result<(), FfsError> {
         let bytes = bincode::serde::encode_to_vec(&op, BINCODE)
-            .map_err(|e| FfsError::StorageError(format!("encode wal op: {e}")))?;
-
-        let rx = {
-            let mut node = self.node.lock().await;
-            node.propose_with_waiter(bytes)?
-        };
-
-        rx.await
-            .map_err(|_| FfsError::ConsensusError("proposal channel closed".into()))?
+            .map_err(|e| FfsError::StorageError(format!("encode: {e}")))?;
+        self.forwarder.propose(bytes, false).await?;
+        Ok(())
     }
 }

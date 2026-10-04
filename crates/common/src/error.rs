@@ -15,4 +15,6 @@ pub enum FfsError {
     ConsensusError(String),
     #[error("Storage error: {0}")]
     StorageError(String),
+    #[error("not leader")]
+    NotLeader,
 }

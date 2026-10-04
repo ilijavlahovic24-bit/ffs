@@ -33,8 +33,6 @@ async fn spawn_cluster() -> (
     let mut nodes: HashMap<u64, Arc<Mutex<RaftNode>>> = HashMap::new();
     let mut servers = Vec::new();
 
-    // Zip id + listener + address so we don't move them out of
-    // potentially-multiple loop iterations.
     let setup: [(u64, TcpListener, SocketAddr); 3] =
         [(1, l1, a1), (2, l2, a2), (3, l3, a3)];
 
@@ -46,16 +44,34 @@ async fn spawn_cluster() -> (
             .collect();
 
         // Fresh per-node WAL.
-        let wal = std::env::temp_dir().join(format!(
-            "ferumfs-net-test-{}-{}.wal",
+        let base = std::env::temp_dir().join(format!(
+            "ferumfs-net-test-{}-{}",
             id,
             std::process::id()
         ));
+        let wal = base.with_extension("raft.wal");
         let _ = std::fs::remove_file(&wal);
 
         let node = Arc::new(Mutex::new(
             RaftNode::with_persistence(id, peers, &wal).unwrap(),
         ));
+
+        // Build a DataPath for this node. The RaftServer needs it to
+        // serve ReadBlob requests from followers.
+        let storage_wal_path = base.with_extension("storage.wal");
+        let _ = std::fs::remove_file(&storage_wal_path);
+        let storage_wal = Arc::new(
+            storage::wal::MetadataWal::new(storage_wal_path).await.unwrap(),
+        );
+
+        let tmp_dir = base.join("tmp");
+        let data_dir = base.join("data");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let data_path = Arc::new(
+            storage::wal::DataPath::new(tmp_dir, data_dir, storage_wal).await,
+        );
 
         // Peer address map: everyone except self.
         let peer_addrs: HashMap<u64, SocketAddr> = addrs
@@ -64,7 +80,7 @@ async fn spawn_cluster() -> (
             .map(|(pid, a)| (*pid, *a))
             .collect();
 
-        let server = RaftServer::new(listener, node.clone(), peer_addrs);
+        let server = RaftServer::new(listener, node.clone(), peer_addrs, data_path);
         servers.push(tokio::spawn(server.run()));
 
         nodes.insert(id, node);

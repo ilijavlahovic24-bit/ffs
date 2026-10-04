@@ -9,6 +9,7 @@ storage      = { path = "../storage" }
 vfs          = { path = "../vfs" }
 meta         = { path = "../meta" }       # samo za InodeManager tip u mount.rs
 consensus    = { path = "../consensus" }  # samo za RaftNode u mount.rs
+network      = {path="../network"}
 fuse3        = { version = "0.9", features = ["tokio-runtime", "unprivileged"] }
 tokio        = { workspace = true }
 tracing      = { workspace = true }
@@ -17,3 +18,4 @@ dashmap      = "5"
 bytes        = "1"
 libc         = "0.2"
 futures-util = "0.3"
+clap = { version = "4.6.7", features = ["derive"] }

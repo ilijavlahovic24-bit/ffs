@@ -1,12 +1,13 @@
-use std::sync::Arc;
 use std::ffi::OsStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use fuse3::raw::prelude::*;
-use fuse3::raw::reply::{ReplyEntry, ReplyDirectory, ReplyDirectoryPlus, DirectoryEntryPlus};
+use fuse3::raw::reply::{DirectoryEntryPlus, ReplyDirectory, ReplyDirectoryPlus, ReplyEntry};
 use fuse3::Result;
 use futures_util::stream::{self, Stream};
 
+use common::error::FfsError;
 use common::types::InodeInfo;
 use vfs::VfsLayer;
 
@@ -22,7 +23,28 @@ impl DirHandler {
         Self { vfs }
     }
 
-    pub async fn lookup(&self, _req: Request, parent: u64, name: &OsStr) -> Result<ReplyEntry> {
+    /// Map an FfsError from a write path to the right errno.
+    ///
+    /// `NotLeader` becomes `EROFS` so the kernel can present a clear
+    /// "read-only file system" error instead of a generic I/O error.
+    fn map_write_err(e: FfsError) -> i32 {
+        match e {
+            FfsError::NotLeader => libc::EROFS,
+            FfsError::NotFound(_) => libc::ENOENT,
+            FfsError::AlreadyExists(_) => libc::EEXIST,
+            FfsError::StorageError(msg) if msg.contains("directory not empty") => libc::ENOTEMPTY,
+            FfsError::StorageError(msg) if msg.contains("not a directory") => libc::ENOTDIR,
+            FfsError::StorageError(msg) if msg.contains("is a directory") => libc::EISDIR,
+            _ => libc::EIO,
+        }
+    }
+
+    pub async fn lookup(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+    ) -> Result<ReplyEntry> {
         let name = name.to_string_lossy();
         match self.vfs.lookup(parent, &name) {
             Ok(info) => Ok(ReplyEntry {
@@ -30,7 +52,8 @@ impl DirHandler {
                 attr: to_file_attr(&info),
                 generation: 0,
             }),
-            Err(_) => Err(libc::ENOENT.into()),
+            Err(FfsError::NotFound(_)) => Err(libc::ENOENT.into()),
+            Err(_) => Err(libc::EIO.into()),
         }
     }
 
@@ -58,7 +81,7 @@ impl DirHandler {
             }),
         ];
 
-        let children = self.vfs.readdir(inode).unwrap_or_default();
+        let children: Vec<InodeInfo> = self.vfs.readdir(inode).unwrap_or_default();
         for (i, child) in children.iter().enumerate() {
             entries.push(Ok(DirectoryEntry {
                 inode: child.ino,
@@ -150,10 +173,14 @@ impl DirHandler {
             .await
             .map_err(|e| {
                 tracing::warn!("mkdir failed: {e}");
-                libc::EIO
+                Self::map_write_err(e)
             })?;
 
-        let info = self.vfs.getattr(ino).map_err(|_| libc::EIO)?;
+        let info = self
+            .vfs
+            .getattr(ino)
+            .map_err(|_| libc::EIO)?;
+
         Ok(ReplyEntry {
             ttl: Duration::from_secs(1),
             attr: to_file_attr(&info),
@@ -161,21 +188,40 @@ impl DirHandler {
         })
     }
 
-    pub async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+    pub async fn unlink(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+    ) -> Result<()> {
         let name = name.to_string_lossy().to_string();
         self.vfs
             .unlink(parent, name)
             .await
-            .map_err(|_| libc::EIO.into())
+            .map_err(|e| {
+                tracing::warn!("unlink failed: {e}");
+                Self::map_write_err(e)
+            })?;
+        Ok(())
     }
 
-    pub async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+    pub async fn rmdir(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+    ) -> Result<()> {
         let name = name.to_string_lossy().to_string();
         self.vfs
             .rmdir(parent, name)
             .await
-            .map_err(|_| libc::EIO.into())
+            .map_err(|e| {
+                tracing::warn!("rmdir failed: {e}");
+                Self::map_write_err(e)
+            })?;
+        Ok(())
     }
+
     pub async fn rename(
         &self,
         _req: Request,
@@ -191,7 +237,7 @@ impl DirHandler {
             .await
             .map_err(|e| {
                 tracing::warn!("rename failed: {e}");
-                libc::EIO
+                Self::map_write_err(e)
             })?;
         Ok(())
     }

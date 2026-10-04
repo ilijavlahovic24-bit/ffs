@@ -2,13 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
+
 use tokio::sync::oneshot;
+
 use common::error::FfsError;
-use common::StateMachine;
-use crate::log::RaftLog;
-use crate::LogEntry;
-use crate::rpc::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply};
+use common::state_machine::StateMachine;
+
+use crate::log::{LogEntry, RaftLog};
 use crate::persistence::{RaftPersistence, RaftRecord};
+use crate::rpc::{AppendEntries, AppendEntriesReply, RequestVote, RequestVoteReply};
+use crate::timer::reset_election_deadline_for;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeState {
     Follower,
@@ -16,6 +20,8 @@ pub enum NodeState {
     Leader,
 }
 
+/// Message that a `RaftNode` wants to send to a peer.
+/// The driver loop in `network::server` turns these into TCP packets.
 #[derive(Debug, Clone)]
 pub enum OutgoingMessage {
     RequestVote { to: u64, req: RequestVote },
@@ -30,6 +36,10 @@ pub struct RaftNode {
     pub current_term: u64,
     pub voted_for: Option<u64>,
 
+    /// Best-known current leader. Set when we become leader or observe
+    /// an AppendEntries from someone else. Reset on step_down.
+    pub current_leader: Option<u64>,
+
     pub log: RaftLog,
     pub commit_index: u64,
     pub last_applied: u64,
@@ -42,18 +52,22 @@ pub struct RaftNode {
     pub election_deadline: Instant,
     pub last_heartbeat: Instant,
 
-    outbox: Vec<OutgoingMessage>,
-    /// WAL for durable state. `None` in tests and in single-shot nodes.
-    persistence: Option<RaftPersistence>,
     /// Optional state machine that receives committed commands.
     pub(crate) state_machine: Option<Arc<dyn StateMachine>>,
 
     /// Pending client proposals waiting for commit.
     /// Key is the log index, value is the channel to signal on commit.
     pub(crate) pending_proposals: HashMap<u64, oneshot::Sender<Result<(), FfsError>>>,
+
+    /// Durable WAL. `None` in tests and in single-shot nodes.
+    persistence: Option<RaftPersistence>,
+
+    /// Messages queued for the driver loop to send.
+    outbox: Vec<OutgoingMessage>,
 }
 
 impl RaftNode {
+    /// Construct an in-memory node with no WAL and no state machine.
     pub fn new(id: u64, peers: Vec<u64>) -> Self {
         let now = Instant::now();
         Self {
@@ -62,48 +76,23 @@ impl RaftNode {
             state: NodeState::Follower,
             current_term: 0,
             voted_for: None,
+            current_leader: None,
             log: RaftLog::new(),
             commit_index: 0,
             last_applied: 0,
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             votes_received: HashSet::new(),
-            election_deadline: crate::timer::reset_election_deadline(),
+            election_deadline: reset_election_deadline_for(id),
             last_heartbeat: now,
-            outbox: Vec::new(),
-            persistence: None,
             state_machine: None,
             pending_proposals: HashMap::new(),
+            persistence: None,
+            outbox: Vec::new(),
         }
     }
 
-    pub fn cluster_size(&self) -> usize {
-        self.peers.len() + 1
-    }
-
-    pub fn majority(&self) -> usize {
-        self.cluster_size() / 2 + 1
-    }
-
-    pub fn take_outbox(&mut self) -> Vec<OutgoingMessage> {
-        std::mem::take(&mut self.outbox)
-    }
-
-    pub(crate) fn push_out(&mut self, msg: OutgoingMessage) {
-        self.outbox.push(msg);
-    }
-    // If the new term is higher, go to Follower and reset the vote.
-    pub(crate) fn observe_term(&mut self, term: u64) -> bool {
-        if term > self.current_term {
-            self.current_term = term;
-            self.voted_for = None;
-            self.state = NodeState::Follower;
-            self.persist_hard_state();
-            true
-        } else {
-            false
-        }
-    }
+    /// Construct a node with a durable WAL.
     pub fn with_persistence(
         id: u64,
         peers: Vec<u64>,
@@ -124,12 +113,24 @@ impl RaftNode {
         node.persistence = Some(RaftPersistence::open(wal_path)?);
         Ok(node)
     }
+
+    /// Construct a node with a state machine and a durable WAL.
+    pub fn with_state_machine(
+        id: u64,
+        peers: Vec<u64>,
+        wal_path: &Path,
+        state_machine: Arc<dyn StateMachine>,
+    ) -> Result<Self, FfsError> {
+        let mut node = Self::with_persistence(id, peers, wal_path)?;
+        node.state_machine = Some(state_machine);
+        Ok(node)
+    }
+
+    /// Apply WAL records in order to reconstruct the state.
     fn replay(&mut self, records: Vec<RaftRecord>) {
         for record in records {
             match record {
                 RaftRecord::HardState { term, voted_for } => {
-                    // Only adopt forward-moving terms. A stale record should
-                    // never bring us back to an earlier term.
                     if term >= self.current_term {
                         self.current_term = term;
                         self.voted_for = voted_for;
@@ -141,20 +142,14 @@ impl RaftNode {
             }
         }
     }
-    /// Apply one `AppendEntry` record during replay.
-    ///
-    /// Matches the in-memory semantics of `handle_append_entries`:
-    /// overwrite at `entry.index` if the term differs, no-op if it's an
-    /// exact duplicate.
+
     fn apply_append_record(&mut self, entry: LogEntry) {
         let last = self.log.last_index();
 
         if entry.index <= last {
             if self.log.term_at(entry.index) == entry.term {
-                // Exact duplicate — idempotent.
                 return;
             }
-            // Conflicting term — truncate from this index.
             self.log.truncate_from(entry.index);
         }
 
@@ -170,10 +165,6 @@ impl RaftNode {
         }
     }
 
-    /// Persist `current_term` and `voted_for`. No-op if no WAL is attached.
-    ///
-    /// Errors are logged but not propagated — a broken WAL is a fatal
-    /// condition that will surface via a different path.
     pub(crate) fn persist_hard_state(&mut self) {
         let Some(p) = self.persistence.as_mut() else {
             return;
@@ -187,7 +178,6 @@ impl RaftNode {
         }
     }
 
-    /// Persist one appended log entry. No-op if no WAL is attached.
     pub(crate) fn persist_append(&mut self, entry: &LogEntry) {
         let Some(p) = self.persistence.as_mut() else {
             return;
@@ -199,28 +189,69 @@ impl RaftNode {
             tracing::error!(node = self.id, "persist append failed: {e}");
         }
     }
-    pub fn with_state_machine(
-        id: u64,
-        peers: Vec<u64>,
-        wal_path: &Path,
-        state_machine: Arc<dyn StateMachine>,
-    ) -> Result<Self, FfsError> {
-        let mut node = Self::with_persistence(id, peers, wal_path)?;
-        node.state_machine = Some(state_machine);
-        Ok(node)
+
+    pub fn cluster_size(&self) -> usize {
+        self.peers.len() + 1
     }
-    // Step down to Follower in `term`, fail all pending proposals.
-    pub(crate) fn step_down(&mut self, term: u64) {
-        self.current_term = term;
-        self.voted_for = None;
-        self.state = NodeState::Follower;
-        self.fail_all_proposals("leadership lost");
-        self.persist_hard_state();
+
+    pub fn majority(&self) -> usize {
+        self.cluster_size() / 2 + 1
     }
+
+    pub fn take_outbox(&mut self) -> Vec<OutgoingMessage> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    pub(crate) fn push_out(&mut self, msg: OutgoingMessage) {
+        self.outbox.push(msg);
+    }
+
     pub fn is_leader(&self) -> bool {
         self.state == NodeState::Leader
     }
 
+    pub fn current_leader(&self) -> Option<u64> {
+        self.current_leader
+    }
+
+    pub fn last_applied_for_index(&self) -> u64 {
+        self.last_applied
+    }
+
+    /// Allocate a fresh inode id from the state machine.
+    pub fn alloc_inode_id(&self) -> u64 {
+        self.state_machine
+            .as_ref()
+            .map(|sm| sm.alloc_inode_id())
+            .unwrap_or(0)
+    }
+
+    /// If `term` is higher than our current, adopt it, step down, and
+    /// persist the new hard state.
+    pub(crate) fn observe_term(&mut self, term: u64) -> bool {
+        if term > self.current_term {
+            self.step_down(term);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Step down to Follower in `term`, fail pending proposals,
+    /// reset the election timer, and persist hard state.
+    ///
+    /// The election timer reset is critical: without it, two nodes that
+    /// observe each other's higher term will immediately restart their
+    /// own elections and ping-pong forever (split vote).
+    pub(crate) fn step_down(&mut self, term: u64) {
+        self.current_term = term;
+        self.voted_for = None;
+        self.state = NodeState::Follower;
+        self.current_leader = None;
+        self.fail_all_proposals("leadership lost");
+        self.election_deadline = reset_election_deadline_for(self.id);
+        self.persist_hard_state();
+    }
 }
 
 #[cfg(test)]

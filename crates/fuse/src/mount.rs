@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,15 +9,19 @@ use fuse3::raw::Session;
 
 use common::error::FfsError;
 use common::state_machine::StateMachine;
-use consensus::{NodeState, RaftNode};
+use consensus::RaftNode;
 use meta::{InodeManager, MetaStore};
+use network::RaftForwarder;
 use storage::allocator::Allocator;
 use storage::wal::{DataPath, MetadataWal};
 use vfs::VfsLayer;
 
 use crate::DistributedFUSE;
 
-/// Boot a single-node Raft cluster and mount FUSE.
+/// Boot a single-node FerumFS instance and mount FUSE.
+///
+/// Single-node shortcut: no RaftServer, no TCP, no peers. The node is
+/// forced into the Leader state so writes commit immediately.
 pub async fn mount(
     mount_point: PathBuf,
     storage_wal_path: PathBuf,
@@ -24,7 +29,7 @@ pub async fn mount(
     tmp_dir: PathBuf,
     data_dir: PathBuf,
 ) -> Result<(), FfsError> {
-    // 1. Local storage WAL + data path (for blob writes; not replicated).
+    // 1. Local storage WAL + data path (for blob writes).
     let storage_wal = Arc::new(MetadataWal::new(storage_wal_path).await?);
     let data_path = Arc::new(DataPath::new(tmp_dir, data_dir, storage_wal).await);
     let allocator = Arc::new(Allocator::new());
@@ -32,7 +37,7 @@ pub async fn mount(
     // 2. State machine (also used for reads).
     let inodes = Arc::new(InodeManager::new().await);
 
-    // 3. Raft node with no peers — commits immediately.
+    // 3. Raft node with no peers.
     let node = RaftNode::with_state_machine(
         1,
         vec![],
@@ -41,21 +46,29 @@ pub async fn mount(
     )?;
     let node = Arc::new(Mutex::new(node));
 
-    // 4. Force leadership immediately (single-node shortcut).
+    // 4. Force leadership immediately.
     {
         let mut n = node.lock().await;
-        n.state = NodeState::Leader;
         n.current_term = 1;
-        n.become_leader(); // proposes no-op, which commits right away
+        n.become_leader(); // sets state = Leader, current_leader, proposes no-op
     }
 
-    // 5. MetaStore.
-    let meta = Arc::new(MetaStore::new(node.clone(), inodes.clone()));
+    // 5. Forwarder with no peers (all calls are local).
+    let forwarder = Arc::new(RaftForwarder::new(node.clone(), HashMap::new()));
 
-    // 6. VfsLayer.
-    let vfs = Arc::new(VfsLayer::new(inodes, meta, data_path, allocator));
+    // 6. MetaStore.
+    let meta = Arc::new(MetaStore::new(inodes.clone(), forwarder.clone()));
 
-    // 7. Mount FUSE.
+    // 7. VfsLayer.
+    let vfs = Arc::new(VfsLayer::new(
+        inodes,
+        meta,
+        data_path,
+        allocator,
+        forwarder,
+    ));
+
+    // 8. Mount FUSE.
     let fs = DistributedFUSE::new(vfs);
 
     let uid = unsafe { libc::getuid() };

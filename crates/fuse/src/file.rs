@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::ffi::OsStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -7,6 +7,7 @@ use fuse3::raw::prelude::*;
 use fuse3::raw::reply::{ReplyCreated, ReplyData, ReplyOpen, ReplyWrite};
 use fuse3::Result;
 
+use common::error::FfsError;
 use vfs::VfsLayer;
 
 use crate::handles::HandleManager;
@@ -19,10 +20,29 @@ pub struct FileHandler {
 
 impl FileHandler {
     pub fn new(vfs: Arc<VfsLayer>, handle_manager: Arc<HandleManager>) -> Self {
-        Self { vfs, handle_manager }
+        Self {
+            vfs,
+            handle_manager,
+        }
     }
 
-    pub async fn open(&self, _req: Request, inode: u64, flags: u32) -> Result<ReplyOpen> {
+    fn map_write_err(e: FfsError) -> i32 {
+        match e {
+            FfsError::NotLeader => libc::EROFS,
+            FfsError::NotFound(_) => libc::ENOENT,
+            FfsError::AlreadyExists(_) => libc::EEXIST,
+            FfsError::StorageError(msg) if msg.contains("is a directory") => libc::EISDIR,
+            FfsError::StorageError(msg) if msg.contains("not a directory") => libc::ENOTDIR,
+            _ => libc::EIO,
+        }
+    }
+
+    pub async fn open(
+        &self,
+        _req: Request,
+        inode: u64,
+        flags: u32,
+    ) -> Result<ReplyOpen> {
         if self.vfs.getattr(inode).is_err() {
             return Err(libc::ENOENT.into());
         }
@@ -42,7 +62,13 @@ impl FileHandler {
             .vfs
             .read(inode, offset, size)
             .await
-            .map_err(|_| libc::EIO)?;
+            .map_err(|e| {
+                tracing::warn!("read failed: {e}");
+                match e {
+                    FfsError::NotFound(_) => libc::ENOENT,
+                    _ => libc::EIO,
+                }
+            })?;
         Ok(ReplyData {
             data: Bytes::from(bytes),
         })
@@ -62,7 +88,10 @@ impl FileHandler {
             .vfs
             .write(inode, offset, data)
             .await
-            .map_err(|_| libc::EIO)?;
+            .map_err(|e| {
+                tracing::warn!("write failed: {e}");
+                Self::map_write_err(e)
+            })?;
         Ok(ReplyWrite { written })
     }
 
@@ -83,7 +112,7 @@ impl FileHandler {
             .await
             .map_err(|e| {
                 tracing::warn!("create failed: {e}");
-                libc::EIO
+                Self::map_write_err(e)
             })?;
 
         let info = self.vfs.getattr(ino).map_err(|_| libc::EIO)?;
@@ -97,6 +126,7 @@ impl FileHandler {
             flags,
         })
     }
+
     pub async fn fsync(
         &self,
         _req: Request,
@@ -105,6 +135,16 @@ impl FileHandler {
         _datasync: bool,
     ) -> Result<()> {
         // Data is fsynced at write time by DataPath::write_blob.
+        Ok(())
+    }
+
+    pub async fn flush(
+        &self,
+        _req: Request,
+        _inode: u64,
+        _fh: u64,
+        _lock_owner: u64,
+    ) -> Result<()> {
         Ok(())
     }
 }

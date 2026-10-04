@@ -9,10 +9,26 @@ const BINCODE: bincode::config::Configuration = bincode::config::standard();
 /// belongs to without tracking connection state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RaftMessage {
+    // Raft RPC
     RequestVote(RequestVote),
     RequestVoteReply { from: u64, reply: RequestVoteReply },
     AppendEntries(AppendEntries),
     AppendEntriesReply { from: u64, reply: AppendEntriesReply },
+
+    // Client forwarding: follower → leader
+    Propose { command: Vec<u8>, allocate_inode: bool },
+    ProposeReply {
+        success: bool,
+        index: u64,
+        inode_id: Option<u64>,
+        error: Option<String>,
+    },
+
+    // Blob data forwarding (leader → follower reads/writes)
+    ReadBlob { inode: u64 },
+    ReadBlobReply { data: Vec<u8> },
+    WriteBlob { inode: u64, data: Vec<u8> },
+    WriteBlobReply { success: bool, error: Option<String> },
 }
 
 pub fn encode(msg: &RaftMessage) -> Result<Vec<u8>, FfsError> {

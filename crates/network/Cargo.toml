@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 common    = { path = "../common" }
 consensus = { path = "../consensus" }
+storage   = {path="../storage"}
 tokio     = { workspace = true }
 tracing   = { workspace = true }
 serde     = { workspace = true }

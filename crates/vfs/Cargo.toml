@@ -7,5 +7,7 @@ edition = "2021"
 common  = { path = "../common" }
 storage = { path = "../storage" }
 meta    = { path = "../meta" }
+network = { path = "../network" }
 tokio   = { workspace = true }
 tracing = { workspace = true }
+serde = { version = "1.0.228", features = ["derive"] }
