@@ -61,3 +61,13 @@ cat /tmp/ferumfs-data/2
 # In Terminal 2:
 fusermount3 -u /tmp/mnt
 mount | grep /tmp/mnt    # must be empty
+
+9. Chaos testing
+
+Short verification test
+timeout 60 ./target/release/chaos --seed 42 --duration 30 --kill-probability 2
+
+Longer test
+timeout 400 ./target/release/chaos --seed 42 --duration 300 --kill-probability 2
+
+
