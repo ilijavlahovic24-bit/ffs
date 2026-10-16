@@ -1,0 +1,20 @@
+{
+  "seed": 42,
+  "duration_sec": 300,
+  "nodes": 3,
+  "metrics": {
+    "kills": 453,
+    "restarts": 453,
+    "elections": 133,
+    "proposals": 4128,
+    "commits": 4260,
+    "violations": 0,
+    "election_p50_ms": 398,
+    "election_p99_ms": 1321,
+    "propose_p50_ms": 11,
+    "propose_p99_ms": 575
+  },
+  "violations": [],
+  "data_loss_incidents": 0,
+  "split_brain_incidents": 0
+}

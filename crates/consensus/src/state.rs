@@ -252,6 +252,9 @@ impl RaftNode {
         self.election_deadline = reset_election_deadline_for(self.id);
         self.persist_hard_state();
     }
+    pub fn force_election_timeout(&mut self) {
+        self.election_deadline = std::time::Instant::now();
+    }
 }
 
 #[cfg(test)]
