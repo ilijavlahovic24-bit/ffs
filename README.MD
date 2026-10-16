@@ -1,5 +1,6 @@
-FerumFS: A Crash-Consistent, High-Performance Distributed File System
-## Status: Active Development
+# FerumFS:
+A Crash-Consistent, High-Performance Distributed File System
+## Status: Completed
 
 ## Overview
 FerumFS is a distributed file system written in Rust, focused on performance and crash consistency.
