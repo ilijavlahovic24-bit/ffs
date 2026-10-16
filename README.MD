@@ -1,4 +1,4 @@
-# FerumFS:
+# FerumFS
 A Crash-Consistent, High-Performance Distributed File System
 ## Status: Completed
 
