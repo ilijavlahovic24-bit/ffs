@@ -11,7 +11,7 @@ It uses Tokio for asynchronous I/O and FUSE3 for userspace filesystem mounting.
 - Linux or WSL
 
 ## Getting Started
-cargo run -- <mount_point>
+Commands [here](commands.md)
 
 ## Project Structure
 Project is structured in Rust Crates.
