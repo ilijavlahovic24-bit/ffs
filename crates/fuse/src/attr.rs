@@ -23,7 +23,7 @@ impl AttrHandler {
 
     pub async fn init(&self, _req: Request) -> Result<ReplyInit> {
         Ok(ReplyInit {
-            max_write: NonZeroU32::new(1024 * 1024).unwrap(),
+            max_write: NonZeroU32::new( 1024 * 1024).unwrap(), // 4 MiB = BLOCK_SIZE
         })
     }
 

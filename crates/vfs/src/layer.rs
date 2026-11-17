@@ -21,15 +21,8 @@ pub struct VfsLayer {
     forwarder: Arc<RaftForwarder>,
     pub metrics: Arc<VfsMetrics>,
 
-    /// Per-inode write lock.
-    ///
-    /// FUSE dispatches multiple `write` calls on the same file handle
-    /// concurrently. Without serialization, the second write reads
-    /// `info.size` before the first commits its new manifest through
-    /// Raft, so it sees a stale size and fails the offset check.
-    ///
-    /// We lock per-inode rather than globally so writes to different
-    /// files stay parallel.
+    /// Per-inode write lock. Serializes writes on the same inode so the
+    /// second write sees the updated size after the first commits.
     write_locks: DashMap<InodeId, Arc<Mutex<()>>>,
 }
 
@@ -84,7 +77,7 @@ impl VfsLayer {
             Err(FfsError::NotFound(_)) => {
                 self.metrics.inc_forwarded_read();
                 let d = self.forwarder.fetch_block(block_id).await?;
-                // Cache locally so the next read is local.
+                // Cache locally for next read.
                 let _ = self.chunks.write_block(block_id, &d).await;
                 Ok(d)
             }
@@ -92,16 +85,55 @@ impl VfsLayer {
         }
     }
 
+    /// Write one block.
+    ///
+    /// On the leader: local write is synchronous (leader's copy is durable
+    /// before we return), replication to peers is fire-and-forget in a
+    /// spawned task. This keeps FUSE write handler latency under the
+    /// kernel's ~1s timeout; blocking on all replicas would exceed it.
+    ///
+    /// On a follower: forward to leader and wait. The leader acks only
+    /// after its own fsync, so the data is durable before we return.
     async fn put_block(&self, block_id: u64, data: &[u8]) -> Result<(), FfsError> {
         if self.forwarder.is_leader().await {
-            // Local write first, then fan out to peers (majority ack).
+            let t0 = std::time::Instant::now();
             self.chunks.write_block(block_id, data).await?;
-            self.forwarder.replicate_block(block_id, data).await?;
+            tracing::info!(
+                block_id,
+                bytes = data.len(),
+                ms = t0.elapsed().as_millis(),
+                "local block write"
+            );
+
+            // Fire-and-forget replication. Do NOT block — FUSE write has
+            // a kernel-side timeout and we've already done a fsync above.
+            // Peers that miss the block fetch it lazily on next read.
+            let peers = self.forwarder.peers_snapshot();
+            let data_owned = data.to_vec();
+            tokio::spawn(async move {
+                let t1 = std::time::Instant::now();
+                match network::forwarder::replicate_to_all(&peers, block_id, &data_owned).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            block_id,
+                            ms = t1.elapsed().as_millis(),
+                            "background replicate done"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            block_id,
+                            ms = t1.elapsed().as_millis(),
+                            "background replicate failed: {e}"
+                        );
+                    }
+                }
+            });
+
+            Ok(())
         } else {
-            // Follower forwards to leader; leader writes + replicates.
-            self.forwarder.write_block(block_id, data).await?;
+            self.forwarder.write_block(block_id, data).await
         }
-        Ok(())
     }
 
     // ---------- File read ----------
@@ -155,8 +187,9 @@ impl VfsLayer {
         offset: u64,
         data: &[u8],
     ) -> Result<u32, FfsError> {
-        // Serialize writes on the same inode so the second write sees the
-        // updated size after the first commits its manifest.
+        // Serialize writes on the same inode. FUSE dispatches multiple
+        // write calls concurrently; without this, the second write sees
+        // stale `info.size` before the first commits its manifest.
         let lock = self
             .write_locks
             .entry(ino)
@@ -170,7 +203,6 @@ impl VfsLayer {
         }
 
         // M3 supports full overwrite (offset 0) and append (offset == size).
-        // Random write into the middle is Phase 10.
         if offset != 0 && offset != info.size {
             return Err(FfsError::StorageError(format!(
                 "only append supported (offset {} != size {}); random write is Phase 10",
@@ -185,37 +217,20 @@ impl VfsLayer {
             ));
         }
 
-        // Start from empty manifest on full overwrite, else extend existing.
         let mut manifest = if offset == 0 {
             Vec::new()
         } else {
             self.inodes.get_manifest(ino)
         };
 
+        // Always emit new blocks per write. No read-modify-write of the
+        // last block — that would be O(N²) during large sequential writes
+        // (write 1 MB, then read 1 MB + write 2 MB, then read 2 MB + write
+        // 3 MB, ...). With new blocks per write, each write is a single
+        // block write + replicate.
         let mut remaining = data;
         let mut cur_offset = offset;
 
-        // If the last block has room, fill it first (append within block).
-        if let Some(last) = manifest.last_mut() {
-            if (last.len as usize) < BLOCK_SIZE && last.end() == cur_offset {
-                let room = BLOCK_SIZE - last.len as usize;
-                let to_write = remaining.len().min(room);
-
-                let mut block_data = self.get_block(last.block_id).await?;
-                block_data.extend_from_slice(&remaining[..to_write]);
-
-                let new_id = self.chunks.alloc_block_id();
-                self.put_block(new_id, &block_data).await?;
-
-                last.block_id = new_id;
-                last.len = block_data.len() as u32;
-
-                remaining = &remaining[to_write..];
-                cur_offset += to_write as u64;
-            }
-        }
-
-        // Emit full blocks for the rest.
         while !remaining.is_empty() {
             let take = remaining.len().min(BLOCK_SIZE);
             let block_data = &remaining[..take];
@@ -232,8 +247,15 @@ impl VfsLayer {
             cur_offset += take as u64;
         }
 
-        // Commit the manifest (and therefore the size) through Raft.
+        // Commit manifest (and therefore size) through Raft.
+        let t2 = std::time::Instant::now();
         self.meta.update_manifest(ino, manifest).await?;
+        tracing::info!(
+            ino,
+            blocks = self.inodes.get_manifest(ino).len(),
+            ms = t2.elapsed().as_millis(),
+            "manifest update (raft)"
+        );
 
         Ok(data.len() as u32)
     }
@@ -304,7 +326,6 @@ impl VfsLayer {
             self.metrics.inc_forwarded_proposal();
         }
 
-        // Delete blocks before removing inode so no orphans on success.
         if let Some(ino) = self.inodes.lookup(parent, &name) {
             let manifest = self.inodes.get_manifest(ino);
             for b in &manifest {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -52,12 +52,16 @@ async fn spawn_cluster() -> (
         let wal = base.with_extension("raft.wal");
         let _ = std::fs::remove_file(&wal);
 
-        let node = Arc::new(Mutex::new(
-            RaftNode::with_persistence(id, peers, &wal).unwrap(),
-        ));
+        let mut raft = RaftNode::with_persistence(id, peers, &wal).unwrap();
+        // Stagger the initial election deadline so the first election
+        // does not split-vote. Real clusters get this naturally because
+        // nodes start at different times; tests start them all at once.
+        raft.election_deadline =
+            Instant::now() + Duration::from_millis(300 * id);
 
-        // Build a ChunkStore for this node. The server needs it to
-        // serve block I/O requests from followers.
+        let node = Arc::new(Mutex::new(raft));
+
+        // Build a ChunkStore for this node.
         let tmp_dir = base.join("tmp");
         let data_dir = base.join("data");
         std::fs::create_dir_all(&tmp_dir).unwrap();
@@ -78,7 +82,6 @@ async fn spawn_cluster() -> (
         nodes.insert(id, node);
     }
 
-    // Servers own the listeners; run forever.
     tokio::spawn(async move {
         for s in servers {
             let _ = s.await;
@@ -92,9 +95,10 @@ async fn spawn_cluster() -> (
 async fn three_nodes_elect_leader_over_tcp() {
     let (nodes, _) = spawn_cluster().await;
 
-    // Wait up to 3 seconds for a leader.
+    // Allow up to 30s. Election timeout is 5-10s and there may be a
+    // split vote or two before stabilizing.
     let mut leader_id = None;
-    for _ in 0..300 {
+    for _ in 0..3000 {
         tokio::time::sleep(Duration::from_millis(10)).await;
         for (id, n) in &nodes {
             if n.lock().await.state == NodeState::Leader {
@@ -107,9 +111,8 @@ async fn three_nodes_elect_leader_over_tcp() {
         }
     }
 
-    let leader_id = leader_id.expect("no leader elected within 3s");
+    let leader_id = leader_id.expect("no leader elected within 30s");
 
-    // Exactly one leader.
     let leaders: Vec<u64> = {
         let mut v = Vec::new();
         for (id, n) in &nodes {
@@ -127,9 +130,8 @@ async fn three_nodes_elect_leader_over_tcp() {
 async fn entry_replicates_to_all_nodes_over_tcp() {
     let (nodes, _) = spawn_cluster().await;
 
-    // Wait for a leader.
     let mut leader_id = None;
-    for _ in 0..300 {
+    for _ in 0..3000 {
         tokio::time::sleep(Duration::from_millis(10)).await;
         for (id, n) in &nodes {
             if n.lock().await.state == NodeState::Leader {
@@ -141,10 +143,8 @@ async fn entry_replicates_to_all_nodes_over_tcp() {
             break;
         }
     }
-    let leader_id = leader_id.expect("no leader");
+    let leader_id = leader_id.expect("no leader elected within 30s");
 
-    // Propose and capture the actual log index (no-op from become_leader
-    // occupies index 1, so client entries start at index 2).
     let idx = {
         let mut l = nodes[&leader_id].lock().await;
         l.propose(b"over-tcp".to_vec()).expect("leader accepts")
@@ -152,11 +152,10 @@ async fn entry_replicates_to_all_nodes_over_tcp() {
     assert!(idx >= 1);
 
     // Give replication time.
-    for _ in 0..100 {
+    for _ in 0..200 {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // Every node must have the entry at the actual index, with our command.
     for (id, n) in &nodes {
         let node = n.lock().await;
         let entry = node

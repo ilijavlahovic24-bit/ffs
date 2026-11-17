@@ -66,7 +66,7 @@ fn parse_peers(s: &str) -> Result<Vec<(u64, SocketAddr)>, FfsError> {
         .collect()
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), FfsError> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)

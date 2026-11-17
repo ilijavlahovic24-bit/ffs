@@ -68,7 +68,7 @@ pub async fn drive_round(
             // Bound each RPC so a dead-but-accepting peer cannot stall
             // the driver.
             let result = tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_millis(500),
                 send_one(addr, wire, node),
             )
                 .await;

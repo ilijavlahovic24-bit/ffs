@@ -111,7 +111,7 @@ impl RaftForwarder {
         }
     }
 
-    // ---------- M3: block-level API ----------
+    // ----------  block-level API ----------
 
     /// Forward a block write to the leader. Blocks until the leader has
     /// written and replicated to a majority.
@@ -174,6 +174,11 @@ impl RaftForwarder {
     pub async fn replicate_block(&self, block_id: u64, data: &[u8]) -> Result<(), FfsError> {
         replicate_to_all(&self.peers, block_id, data).await
     }
+
+    /// Snapshot of the peer map for background replication. Cheap clone.
+    pub fn peers_snapshot(&self) -> HashMap<u64, SocketAddr> {
+        self.peers.clone()
+    }
 }
 
 // Re-export helpers used elsewhere.
@@ -211,7 +216,7 @@ pub async fn replicate_to_all(
         set.spawn(async move {
             let msg = RaftMessage::ReplicateBlock { block_id, data };
             let result = tokio::time::timeout(
-                Duration::from_millis(500),
+                Duration::from_secs(5),
                 request_wire(addr, msg),
             )
                 .await;
@@ -219,7 +224,7 @@ pub async fn replicate_to_all(
                 Ok(Ok(RaftMessage::ReplicateBlockReply { success: true, .. })) => Ok(()),
                 Ok(Ok(RaftMessage::ReplicateBlockReply { success: false, error })) => {
                     Err(FfsError::StorageError(format!(
-                        "peer rejected replicate: {}",
+                        "peer rejected: {}",
                         error.unwrap_or_else(|| "unknown".into())
                     )))
                 }
@@ -232,7 +237,6 @@ pub async fn replicate_to_all(
         });
     }
 
-    // Self already wrote locally, so we count 1 ack from the start.
     let mut acked = 1u32;
     let mut first_err: Option<FfsError> = None;
 
@@ -240,6 +244,17 @@ pub async fn replicate_to_all(
         match res {
             Ok(Ok(())) => {
                 acked += 1;
+                // *** EARLY RETURN as soon as we have majority ***
+                if acked >= majority as u32 {
+                    set.abort_all();
+                    if acked < total as u32 {
+                        tracing::warn!(
+                            block_id, acked, total,
+                            "partial replication (majority achieved, lazy repair)"
+                        );
+                    }
+                    return Ok(());
+                }
             }
             Ok(Err(e)) => {
                 if first_err.is_none() {
@@ -254,19 +269,7 @@ pub async fn replicate_to_all(
         }
     }
 
-    if acked >= majority as u32 {
-        if acked < total as u32 {
-            tracing::warn!(
-                block_id,
-                acked,
-                total,
-                "partial replication (majority achieved, will repair lazily)"
-            );
-        }
-        Ok(())
-    } else {
-        Err(first_err.unwrap_or_else(|| {
-            FfsError::StorageError(format!("only {acked}/{total} acked"))
-        }))
-    }
+    Err(first_err.unwrap_or_else(|| {
+        FfsError::StorageError(format!("only {acked}/{total} acked"))
+    }))
 }

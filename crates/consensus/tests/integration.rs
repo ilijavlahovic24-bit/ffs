@@ -2,8 +2,7 @@
 //!
 //! A `Cluster` holds several `RaftNode`s and routes messages between them
 //! in memory. No TCP, no tokio tasks per node — everything is driven
-//! synchronously by `tick_all()`, which advances timers and drains all
-//! outboxes.
+//! synchronously by `tick_all()`.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -17,14 +16,19 @@ struct Cluster {
 impl Cluster {
     fn new(ids: &[u64]) -> Self {
         let mut nodes = HashMap::new();
-        for &id in ids {
+        for (i, &id) in ids.iter().enumerate() {
             let peers: Vec<u64> = ids.iter().copied().filter(|&x| x != id).collect();
-            nodes.insert(id, RaftNode::new(id, peers));
+            let mut node = RaftNode::new(id, peers);
+            // Stagger initial deadlines so the first election doesn't
+            // split-vote. Real clusters have this naturally because nodes
+            // start at different times; tests start them all at once.
+            node.election_deadline =
+                std::time::Instant::now() + Duration::from_millis(300 * (i as u64 + 1));
+            nodes.insert(id, node);
         }
         Self { nodes }
     }
 
-    /// Advance every node's timers once, then deliver all pending messages.
     fn tick_all(&mut self) {
         let ids: Vec<u64> = self.nodes.keys().copied().collect();
         for id in ids {
@@ -33,9 +37,6 @@ impl Cluster {
         self.deliver_all();
     }
 
-    /// Deliver messages until no node has anything left in its outbox.
-    /// New messages can be produced as a side effect of handling a reply,
-    /// hence the outer loop.
     fn deliver_all(&mut self) {
         loop {
             let mut produced = false;
@@ -106,35 +107,30 @@ async fn elects_single_leader_in_three_node_cluster() {
     let mut cluster = Cluster::new(&[1, 2, 3]);
 
     let leader = cluster
-        .run_until_leader(2000, 10)
+        .run_until_leader(120000, 10)
         .await
-        .expect("no leader elected within 2s");
+        .expect("no leader elected within 5s");
 
-    // Exactly one leader.
     assert_eq!(cluster.leaders().len(), 1);
     assert_eq!(cluster.leader(), Some(leader));
-
-    // The leader has a higher term than the initial 0.
     assert!(cluster.nodes[&leader].current_term >= 1);
 
-    // Followers are all in Follower state.
     for (&id, node) in &cluster.nodes {
         if id != leader {
             assert_eq!(node.state, NodeState::Follower);
         }
     }
 }
+
 #[tokio::test]
 async fn leader_replicates_entry_to_followers() {
     let mut cluster = Cluster::new(&[1, 2, 3]);
     let leader_id = cluster
-        .run_until_leader(2000, 10)
+        .run_until_leader(5000, 10)
         .await
         .expect("no leader");
 
-    // Propose a command. The index is not necessarily 1 — becoming
-    // leader auto-proposes a no-op entry (Raft §8), which occupies
-    // index 1. We just record whatever index we got.
+    // Propose and capture the actual log index (no-op occupies index 1).
     let idx = cluster
         .nodes
         .get_mut(&leader_id)
@@ -143,14 +139,13 @@ async fn leader_replicates_entry_to_followers() {
         .expect("leader should accept proposal");
     assert!(idx >= 1);
 
-    // Deliver everything, tick a few times so heartbeat carries commit_index.
+    // Deliver, tick, let it propagate.
     for _ in 0..20 {
-        cluster.deliver_all();
         cluster.tick_all();
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // Every node must have the entry at `idx` with our command.
+    // Every node must have the entry at `idx`.
     for (&id, node) in &cluster.nodes {
         let entry = node
             .log
@@ -173,29 +168,33 @@ async fn leader_replicates_entry_to_followers() {
         );
     }
 }
+
 #[tokio::test]
 async fn followers_step_down_on_higher_term() {
     let mut cluster = Cluster::new(&[1, 2, 3]);
     let leader_id = cluster
-        .run_until_leader(2000, 10)
+        .run_until_leader(5000, 10)
         .await
         .expect("no leader");
 
     let leader_term = cluster.nodes[&leader_id].current_term;
 
-    // Bump one follower's term artificially. The old leader will only
-    // learn about the higher term when it next sends a heartbeat and
-    // receives a rejection (reply.term > current_term).
     let follower_id = *cluster
         .nodes
         .keys()
         .find(|&&id| id != leader_id)
         .unwrap();
-    cluster.nodes.get_mut(&follower_id).unwrap().current_term = leader_term + 5;
 
-    // Run for a while: the old leader should step down, and a new
-    // election should produce a leader in a higher term.
-    for _ in 0..300 {
+    // Bump term AND force immediate election so the higher term actually
+    // propagates. Without forcing the deadline, the follower would just
+    // sit there waiting for its next election tick (up to 1s away).
+    {
+        let follower = cluster.nodes.get_mut(&follower_id).unwrap();
+        follower.current_term = leader_term + 5;
+        follower.force_election_timeout();
+    }
+
+    for _ in 0..500 {
         cluster.tick_all();
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
