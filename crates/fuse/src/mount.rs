@@ -12,8 +12,8 @@ use common::state_machine::StateMachine;
 use consensus::RaftNode;
 use meta::{InodeManager, MetaStore};
 use network::RaftForwarder;
+use storage::ChunkStore;
 use storage::allocator::Allocator;
-use storage::wal::{DataPath, MetadataWal};
 use vfs::VfsLayer;
 
 use crate::DistributedFUSE;
@@ -24,20 +24,20 @@ use crate::DistributedFUSE;
 /// forced into the Leader state so writes commit immediately.
 pub async fn mount(
     mount_point: PathBuf,
-    storage_wal_path: PathBuf,
     raft_wal_path: PathBuf,
     tmp_dir: PathBuf,
     data_dir: PathBuf,
 ) -> Result<(), FfsError> {
-    // 1. Local storage WAL + data path (for blob writes).
-    let storage_wal = Arc::new(MetadataWal::new(storage_wal_path).await?);
-    let data_path = Arc::new(DataPath::new(tmp_dir, data_dir, storage_wal).await);
+    // 1. Chunk store (ADR-005).
+    let chunks = Arc::new(ChunkStore::new(tmp_dir, data_dir));
+
+    // 2. Allocator (reserved).
     let allocator = Arc::new(Allocator::new());
 
-    // 2. State machine (also used for reads).
+    // 3. State machine.
     let inodes = Arc::new(InodeManager::new().await);
 
-    // 3. Raft node with no peers.
+    // 4. Raft node with no peers.
     let node = RaftNode::with_state_machine(
         1,
         vec![],
@@ -46,29 +46,29 @@ pub async fn mount(
     )?;
     let node = Arc::new(Mutex::new(node));
 
-    // 4. Force leadership immediately.
+    // 5. Force leadership immediately (single-node shortcut).
     {
         let mut n = node.lock().await;
         n.current_term = 1;
-        n.become_leader(); // sets state = Leader, current_leader, proposes no-op
+        n.become_leader();
     }
 
-    // 5. Forwarder with no peers (all calls are local).
+    // 6. Forwarder with no peers — all calls local.
     let forwarder = Arc::new(RaftForwarder::new(node.clone(), HashMap::new()));
 
-    // 6. MetaStore.
+    // 7. MetaStore.
     let meta = Arc::new(MetaStore::new(inodes.clone(), forwarder.clone()));
 
-    // 7. VfsLayer.
+    // 8. VFS.
     let vfs = Arc::new(VfsLayer::new(
         inodes,
         meta,
-        data_path,
+        chunks,
         allocator,
         forwarder,
     ));
 
-    // 8. Mount FUSE.
+    // 9. Mount FUSE.
     let fs = DistributedFUSE::new(vfs);
 
     let uid = unsafe { libc::getuid() };

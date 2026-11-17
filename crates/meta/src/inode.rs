@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-
+use common::BlockRef;
 use common::error::FfsError;
 use common::state_machine::StateMachine;
 use common::types::{FileType, InodeId, InodeInfo};
@@ -14,6 +14,7 @@ pub struct InodeManager {
     next_inode: AtomicU64,
     inodes: DashMap<InodeId, InodeInfo>,
     name_to_inode: DashMap<(InodeId, String), InodeId>,
+    manifests: DashMap<InodeId, Vec<BlockRef>>,
 }
 
 impl InodeManager {
@@ -22,6 +23,7 @@ impl InodeManager {
             next_inode: AtomicU64::new(2),
             inodes: DashMap::new(),
             name_to_inode: DashMap::new(),
+            manifests: DashMap::new(),
         };
         manager.inodes.insert(
             1,
@@ -72,6 +74,7 @@ impl InodeManager {
         };
         self.name_to_inode.retain(|(p, _), _| *p != ino);
         self.inodes.remove(&ino);
+        self.manifests.remove(&ino);
         Ok(())
     }
 
@@ -139,6 +142,21 @@ impl InodeManager {
         info.mode = mode;
         Ok(())
     }
+    pub fn get_manifest(&self, ino: InodeId) -> Vec<BlockRef> {
+        self.manifests.get(&ino).map(|m| m.clone()).unwrap_or_default()
+    }
+
+    pub fn set_manifest(&self, ino: InodeId, blocks: Vec<BlockRef>) {
+        let size = blocks.last().map(|b| b.end()).unwrap_or(0);
+        self.manifests.insert(ino, blocks);
+        if let Some(mut info) = self.inodes.get_mut(&ino) {
+            info.size = size;
+        }
+    }
+
+    pub fn delete_manifest(&self, ino: InodeId) {
+        self.manifests.remove(&ino);
+    }
 }
 
 impl StateMachine for InodeManager {
@@ -201,7 +219,12 @@ impl StateMachine for InodeManager {
                 let _ = self.chmod(inode_id, mode);
                 Ok(())
             }
+            WalOperation::UpdateManifest { inode_id, blocks } => {
+                self.set_manifest(inode_id, blocks);
+                Ok(())
+            }
             WalOperation::WriteBlob { .. } => Ok(()),
+
         }
     }
 
@@ -249,11 +272,18 @@ impl ApplyWalEntry for InodeManager {
                 }
             }
             WalOperation::Truncate { inode_id, size } => {
-                let _ = self.truncate(inode_id, size);
+                // Legacy: size-only update. Used during transition.
+                if let Some(mut info) = self.inodes.get_mut(&inode_id) {
+                    info.size = size;
+                }
                 Ok(())
             }
             WalOperation::Chmod { inode_id, mode } => {
                 let _ = self.chmod(inode_id, mode);
+                Ok(())
+            }
+            WalOperation::UpdateManifest { inode_id, blocks } => {
+                self.set_manifest(inode_id, blocks);
                 Ok(())
             }
             WalOperation::WriteBlob { .. } => Ok(()),

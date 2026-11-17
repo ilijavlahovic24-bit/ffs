@@ -31,6 +31,14 @@ pub enum RaftMessage {
     WriteBlobReply { success: bool, error: Option<String> },
     ReplicateBlob { inode: u64, data: Vec<u8> },
     ReplicateBlobReply { success: bool, error: Option<String> },
+
+
+    WriteBlock { block_id: u64, data: Vec<u8> },
+    WriteBlockReply { success: bool, error: Option<String> },
+    FetchBlock { block_id: u64 },
+    FetchBlockReply { data: Option<Vec<u8>> },
+    ReplicateBlock { block_id: u64, data: Vec<u8> },
+    ReplicateBlockReply { success: bool, error: Option<String> },
 }
 
 pub fn encode(msg: &RaftMessage) -> Result<Vec<u8>, FfsError> {

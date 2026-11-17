@@ -26,7 +26,18 @@ impl RaftForwarder {
         self.node.lock().await.is_leader()
     }
 
-    /// Wait for a leader to be known (up to 2s), returning its id.
+    pub async fn current_leader(&self) -> Option<u64> {
+        self.node.lock().await.current_leader()
+    }
+
+    pub async fn node_id(&self) -> u64 {
+        self.node.lock().await.id
+    }
+
+    pub fn peer_count(&self) -> usize {
+        self.peers.len()
+    }
+
     async fn wait_for_leader(&self) -> Result<u64, FfsError> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -40,10 +51,6 @@ impl RaftForwarder {
         }
     }
 
-    /// Propose `command` to the cluster. If this node is leader, apply
-    /// locally; otherwise forward to leader. Waits for local apply.
-    ///
-    /// If `allocate_inode`, the caller receives the leader-allocated inode.
     pub async fn propose(
         &self,
         command: Vec<u8>,
@@ -53,25 +60,20 @@ impl RaftForwarder {
         let self_id = self.node.lock().await.id;
 
         if leader_id == self_id {
-            // Local propose.
-            let (rx, _) = {
+            let rx = {
                 let mut n = self.node.lock().await;
-                // Local path doesn't support allocate_inode — this should
-                // only be called by followers. Return error to be safe.
                 if allocate_inode {
                     return Err(FfsError::StorageError(
                         "allocate_inode on leader path not supported".into(),
                     ));
                 }
-                let rx = n.propose_with_waiter(command)?;
-                (rx, ())
+                n.propose_with_waiter(command)?
             };
             rx.await
                 .map_err(|_| FfsError::ConsensusError("channel closed".into()))??;
             return Ok(None);
         }
 
-        // Remote forward.
         let addr = *self
             .peers
             .get(&leader_id)
@@ -87,7 +89,6 @@ impl RaftForwarder {
                         error.unwrap_or_else(|| "propose failed".into()),
                     ));
                 }
-                // Wait for local state machine to catch up to `index`.
                 self.wait_local_apply(index).await?;
                 Ok(inode_id)
             }
@@ -95,7 +96,6 @@ impl RaftForwarder {
         }
     }
 
-    /// Poll until `last_applied >= index` or timeout.
     async fn wait_local_apply(&self, index: u64) -> Result<(), FfsError> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -111,73 +111,68 @@ impl RaftForwarder {
         }
     }
 
-    /// Read blob from leader if we're a follower.
-    pub async fn read_blob(&self, inode: u64) -> Result<Vec<u8>, FfsError> {
+    // ---------- M3: block-level API ----------
+
+    /// Forward a block write to the leader. Blocks until the leader has
+    /// written and replicated to a majority.
+    pub async fn write_block(&self, block_id: u64, data: &[u8]) -> Result<(), FfsError> {
         let leader_id = self.wait_for_leader().await?;
         let self_id = self.node.lock().await.id;
-
         if leader_id == self_id {
             return Err(FfsError::StorageError(
-                "read_blob called on leader (use local DataPath)".into(),
+                "write_block on leader (use local ChunkStore)".into(),
             ));
         }
-
         let addr = *self
             .peers
             .get(&leader_id)
             .ok_or_else(|| FfsError::ConsensusError(format!("unknown leader {leader_id}")))?;
-
-        let reply = request_wire(addr, RaftMessage::ReadBlob { inode }).await?;
+        let reply = request_wire(
+            addr,
+            RaftMessage::WriteBlock {
+                block_id,
+                data: data.to_vec(),
+            },
+        )
+            .await?;
         match reply {
-            RaftMessage::ReadBlobReply { data } => Ok(data),
-            _ => Err(FfsError::StorageError("unexpected reply type".into())),
-        }
-    }
-    /// Forward a blob write to the leader.
-    ///
-    /// Called by followers when FUSE asks them to write data. The leader
-    /// writes the blob to its local `DataPath` and returns success.
-    /// Metadata (size, etc.) is updated separately through Raft.
-    pub async fn write_blob(&self, inode: u64, data: &[u8]) -> Result<(), FfsError> {
-        let leader_id = self.wait_for_leader().await?;
-        let self_id = self.node.lock().await.id;
-
-        if leader_id == self_id {
-            return Err(FfsError::StorageError(
-                "write_blob called on leader (use local DataPath)".into(),
-            ));
-        }
-
-        let addr = *self
-            .peers
-            .get(&leader_id)
-            .ok_or_else(|| FfsError::ConsensusError(format!("unknown leader {leader_id}")))?;
-
-        let wire = RaftMessage::WriteBlob {
-            inode,
-            data: data.to_vec(),
-        };
-        let reply = request_wire(addr, wire).await?;
-        match reply {
-            RaftMessage::WriteBlobReply { success, error } => {
+            RaftMessage::WriteBlockReply { success, error } => {
                 if success {
                     Ok(())
                 } else {
                     Err(FfsError::StorageError(
-                        error.unwrap_or_else(|| "remote write failed".into()),
+                        error.unwrap_or_else(|| "write failed".into()),
                     ))
                 }
             }
-            _ => Err(FfsError::StorageError("unexpected reply type".into())),
+            _ => Err(FfsError::StorageError("unexpected reply".into())),
         }
     }
 
-    /// Replicate a blob to all peers. Blocks until every peer acks.
-    ///
-    /// Only valid on the leader — followers should use `write_blob`,
-    /// which forwards to the leader who will do the replication.
-    pub async fn replicate_blob(&self, inode: u64, data: &[u8]) -> Result<(), FfsError> {
-        replicate_to_all(&self.peers, inode, data).await
+    /// Fetch a block from the leader (used when local copy is missing).
+    pub async fn fetch_block(&self, block_id: u64) -> Result<Vec<u8>, FfsError> {
+        let leader_id = self.wait_for_leader().await?;
+        let self_id = self.node.lock().await.id;
+        if leader_id == self_id {
+            return Err(FfsError::StorageError(
+                "fetch_block on leader (read local)".into(),
+            ));
+        }
+        let addr = *self
+            .peers
+            .get(&leader_id)
+            .ok_or_else(|| FfsError::ConsensusError(format!("unknown leader {leader_id}")))?;
+        let reply = request_wire(addr, RaftMessage::FetchBlock { block_id }).await?;
+        match reply {
+            RaftMessage::FetchBlockReply { data: Some(d) } => Ok(d),
+            RaftMessage::FetchBlockReply { data: None } => Err(FfsError::NotFound(block_id)),
+            _ => Err(FfsError::StorageError("unexpected reply".into())),
+        }
+    }
+
+    /// Fan out a block to all peers, requiring a majority of acks.
+    pub async fn replicate_block(&self, block_id: u64, data: &[u8]) -> Result<(), FfsError> {
+        replicate_to_all(&self.peers, block_id, data).await
     }
 }
 
@@ -192,16 +187,14 @@ pub async fn request_wire(
     decode(&bytes)
 }
 
-/// Fan-out a blob to all peers. Returns `Ok` only if every peer acked
-/// within the timeout. Any failure (peer down, slow, or returned error)
-/// propagates to the caller.
+/// Fan-out a block to all peers, requiring a majority to ack.
 ///
-/// The leader's own write is not done here — the caller must have
-/// already written locally before calling this. Total durability is
-/// therefore `1 (self) + N (peers)`.
+/// `total = 1 (self) + peers.len()`, `majority = total / 2 + 1`. A write
+/// succeeds as long as a majority of nodes have the block. Missing nodes
+/// pick it up lazily on next read or at startup repair.
 pub async fn replicate_to_all(
     peers: &HashMap<u64, SocketAddr>,
-    inode: u64,
+    block_id: u64,
     data: &[u8],
 ) -> Result<(), FfsError> {
     let total = peers.len() + 1;
@@ -216,17 +209,17 @@ pub async fn replicate_to_all(
         let addr = *addr;
         let data = data.to_vec();
         set.spawn(async move {
-            let msg = RaftMessage::ReplicateBlob { inode, data };
+            let msg = RaftMessage::ReplicateBlock { block_id, data };
             let result = tokio::time::timeout(
                 Duration::from_millis(500),
                 request_wire(addr, msg),
             )
                 .await;
             match result {
-                Ok(Ok(RaftMessage::ReplicateBlobReply { success: true, .. })) => Ok(()),
-                Ok(Ok(RaftMessage::ReplicateBlobReply { success: false, error })) => {
+                Ok(Ok(RaftMessage::ReplicateBlockReply { success: true, .. })) => Ok(()),
+                Ok(Ok(RaftMessage::ReplicateBlockReply { success: false, error })) => {
                     Err(FfsError::StorageError(format!(
-                        "peer rejected: {}",
+                        "peer rejected replicate: {}",
                         error.unwrap_or_else(|| "unknown".into())
                     )))
                 }
@@ -255,7 +248,7 @@ pub async fn replicate_to_all(
             }
             Err(e) => {
                 if first_err.is_none() {
-                    first_err = Some(FfsError::StorageError(format!("join: {e}")));
+                    first_err = Some(FfsError::StorageError(format!("join error: {e}")));
                 }
             }
         }
@@ -264,7 +257,7 @@ pub async fn replicate_to_all(
     if acked >= majority as u32 {
         if acked < total as u32 {
             tracing::warn!(
-                inode,
+                block_id,
                 acked,
                 total,
                 "partial replication (majority achieved, will repair lazily)"

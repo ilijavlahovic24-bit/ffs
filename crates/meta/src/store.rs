@@ -131,4 +131,13 @@ impl MetaStore {
         self.forwarder.propose(bytes, false).await?;
         Ok(())
     }
+
+    pub async fn update_manifest(
+        &self,
+        ino: InodeId,
+        blocks: Vec<common::types::BlockRef>,
+    ) -> Result<(), FfsError> {
+        self.propose_op(WalOperation::UpdateManifest { inode_id: ino, blocks })
+            .await
+    }
 }

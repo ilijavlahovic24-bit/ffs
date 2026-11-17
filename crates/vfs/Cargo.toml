@@ -11,3 +11,4 @@ network = { path = "../network" }
 tokio   = { workspace = true }
 tracing = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
+dashmap = "7.0.0-rc2"

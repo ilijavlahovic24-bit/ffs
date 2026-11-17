@@ -1032,6 +1032,7 @@ name = "vfs"
 version = "0.1.0"
 dependencies = [
  "common",
+ "dashmap 7.0.0-rc2",
  "meta",
  "network",
  "serde",

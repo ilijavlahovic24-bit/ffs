@@ -1,55 +1,58 @@
 use std::sync::Arc;
 
+use dashmap::DashMap;
+use tokio::sync::Mutex;
+
 use common::error::FfsError;
-use common::types::{FileType, InodeId, InodeInfo};
+use common::types::{BlockRef, FileType, InodeId, InodeInfo, BLOCK_SIZE};
 use meta::{InodeManager, MetaStore};
 use network::RaftForwarder;
 use storage::allocator::Allocator;
-use storage::wal::DataPath;
+use storage::ChunkStore;
 
 use crate::metrics::VfsMetrics;
 
-/// Files larger than this go through the blob path.
-/// Files smaller go through the block path (currently the same code —
-/// see the `write` implementation).
-pub const LARGE_FILE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
-
-/// Interposition layer between FUSE handlers and the storage/meta stack.
-///
-/// Reads are served from the local state machine; blob reads are forwarded
-/// to the leader when this node is a follower (ADR-003: data is not
-/// replicated, only metadata is).
-///
-/// Writes go through `MetaStore` which routes through Raft.
 pub struct VfsLayer {
     inodes: Arc<InodeManager>,
     meta: Arc<MetaStore>,
-    data: Arc<DataPath>,
+    chunks: Arc<ChunkStore>,
     #[allow(dead_code)]
     allocator: Arc<Allocator>,
     forwarder: Arc<RaftForwarder>,
     pub metrics: Arc<VfsMetrics>,
+
+    /// Per-inode write lock.
+    ///
+    /// FUSE dispatches multiple `write` calls on the same file handle
+    /// concurrently. Without serialization, the second write reads
+    /// `info.size` before the first commits its new manifest through
+    /// Raft, so it sees a stale size and fails the offset check.
+    ///
+    /// We lock per-inode rather than globally so writes to different
+    /// files stay parallel.
+    write_locks: DashMap<InodeId, Arc<Mutex<()>>>,
 }
 
 impl VfsLayer {
     pub fn new(
         inodes: Arc<InodeManager>,
         meta: Arc<MetaStore>,
-        data: Arc<DataPath>,
+        chunks: Arc<ChunkStore>,
         allocator: Arc<Allocator>,
         forwarder: Arc<RaftForwarder>,
     ) -> Self {
         Self {
             inodes,
             meta,
-            data,
+            chunks,
             allocator,
             forwarder,
             metrics: Arc::new(VfsMetrics::new()),
+            write_locks: DashMap::new(),
         }
     }
 
-    // --- Reads ----------------------------------------------------------
+    // ---------- Namespace reads ----------
 
     pub fn lookup(&self, parent: InodeId, name: &str) -> Result<InodeInfo, FfsError> {
         let ino = self
@@ -70,10 +73,39 @@ impl VfsLayer {
         Ok(self.inodes.children(ino))
     }
 
-    /// Read `size` bytes from `ino` starting at `offset`.
-    ///
-    /// Blob data is stored only on the leader (ADR-003). If this node is
-    /// not the leader, the read is forwarded over TCP.
+    // ---------- Block I/O helpers ----------
+
+    async fn get_block(&self, block_id: u64) -> Result<Vec<u8>, FfsError> {
+        match self.chunks.read_block(block_id).await {
+            Ok(d) => {
+                self.metrics.inc_local_read();
+                Ok(d)
+            }
+            Err(FfsError::NotFound(_)) => {
+                self.metrics.inc_forwarded_read();
+                let d = self.forwarder.fetch_block(block_id).await?;
+                // Cache locally so the next read is local.
+                let _ = self.chunks.write_block(block_id, &d).await;
+                Ok(d)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn put_block(&self, block_id: u64, data: &[u8]) -> Result<(), FfsError> {
+        if self.forwarder.is_leader().await {
+            // Local write first, then fan out to peers (majority ack).
+            self.chunks.write_block(block_id, data).await?;
+            self.forwarder.replicate_block(block_id, data).await?;
+        } else {
+            // Follower forwards to leader; leader writes + replicates.
+            self.forwarder.write_block(block_id, data).await?;
+        }
+        Ok(())
+    }
+
+    // ---------- File read ----------
+
     pub async fn read(
         &self,
         ino: InodeId,
@@ -85,30 +117,157 @@ impl VfsLayer {
             return Err(FfsError::StorageError("read on directory".into()));
         }
 
-        // With full replication (ADR-004), every node has every blob.
-        // Try local first; fall back to leader only if local is missing
-        // (transient during repair or right after a node joins).
-        let bytes = match self.data.read_blob(ino).await {
-            Ok(b) => {
-                self.metrics.inc_local_read();
-                b
-            }
-            Err(FfsError::NotFound(_)) => {
-                self.metrics.inc_forwarded_read();
-                self.forwarder.read_blob(ino).await?
-            }
-            Err(e) => return Err(e),
-        };
-
-        let start = offset as usize;
-        if start >= bytes.len() {
+        if size == 0 {
             return Ok(Vec::new());
         }
-        let end = (start + size as usize).min(bytes.len());
-        Ok(bytes[start..end].to_vec())
+
+        let start = offset;
+        let end = offset + size as u64;
+        let manifest = self.inodes.get_manifest(ino);
+        let mut out = Vec::with_capacity(size as usize);
+
+        for block_ref in &manifest {
+            if block_ref.end() <= start {
+                continue;
+            }
+            if block_ref.offset >= end {
+                break;
+            }
+
+            let block_data = self.get_block(block_ref.block_id).await?;
+
+            let from = start.saturating_sub(block_ref.offset) as usize;
+            let to = (end.min(block_ref.end()) - block_ref.offset) as usize;
+
+            if from < block_data.len() && to <= block_data.len() && from < to {
+                out.extend_from_slice(&block_data[from..to]);
+            }
+        }
+
+        Ok(out)
     }
 
-    // --- Writes ---------------------------------------------------------
+    // ---------- File write ----------
+
+    pub async fn write(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u32, FfsError> {
+        // Serialize writes on the same inode so the second write sees the
+        // updated size after the first commits its manifest.
+        let lock = self
+            .write_locks
+            .entry(ino)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        let info = self.getattr(ino)?;
+        if info.kind == FileType::Directory {
+            return Err(FfsError::StorageError("write on directory".into()));
+        }
+
+        // M3 supports full overwrite (offset 0) and append (offset == size).
+        // Random write into the middle is Phase 10.
+        if offset != 0 && offset != info.size {
+            return Err(FfsError::StorageError(format!(
+                "only append supported (offset {} != size {}); random write is Phase 10",
+                offset, info.size
+            )));
+        }
+
+        // Disallow truncating overwrite: we don't yet delete orphaned blocks.
+        if offset == 0 && info.size > 0 && (data.len() as u64) < info.size {
+            return Err(FfsError::StorageError(
+                "overwrite of existing non-empty file is Phase 10".into(),
+            ));
+        }
+
+        // Start from empty manifest on full overwrite, else extend existing.
+        let mut manifest = if offset == 0 {
+            Vec::new()
+        } else {
+            self.inodes.get_manifest(ino)
+        };
+
+        let mut remaining = data;
+        let mut cur_offset = offset;
+
+        // If the last block has room, fill it first (append within block).
+        if let Some(last) = manifest.last_mut() {
+            if (last.len as usize) < BLOCK_SIZE && last.end() == cur_offset {
+                let room = BLOCK_SIZE - last.len as usize;
+                let to_write = remaining.len().min(room);
+
+                let mut block_data = self.get_block(last.block_id).await?;
+                block_data.extend_from_slice(&remaining[..to_write]);
+
+                let new_id = self.chunks.alloc_block_id();
+                self.put_block(new_id, &block_data).await?;
+
+                last.block_id = new_id;
+                last.len = block_data.len() as u32;
+
+                remaining = &remaining[to_write..];
+                cur_offset += to_write as u64;
+            }
+        }
+
+        // Emit full blocks for the rest.
+        while !remaining.is_empty() {
+            let take = remaining.len().min(BLOCK_SIZE);
+            let block_data = &remaining[..take];
+            let new_id = self.chunks.alloc_block_id();
+            self.put_block(new_id, block_data).await?;
+
+            manifest.push(BlockRef {
+                block_id: new_id,
+                offset: cur_offset,
+                len: take as u32,
+            });
+
+            remaining = &remaining[take..];
+            cur_offset += take as u64;
+        }
+
+        // Commit the manifest (and therefore the size) through Raft.
+        self.meta.update_manifest(ino, manifest).await?;
+
+        Ok(data.len() as u32)
+    }
+
+    // ---------- Truncate ----------
+
+    pub async fn truncate(&self, ino: InodeId, size: u64) -> Result<(), FfsError> {
+        if size != 0 {
+            return Err(FfsError::StorageError(
+                "truncate to nonzero is Phase 10".into(),
+            ));
+        }
+
+        let lock = self
+            .write_locks
+            .entry(ino)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        let old_manifest = self.inodes.get_manifest(ino);
+        for b in &old_manifest {
+            let _ = self.chunks.delete_block(b.block_id).await;
+        }
+
+        self.meta.update_manifest(ino, Vec::new()).await?;
+        Ok(())
+    }
+
+    pub async fn chmod(&self, ino: InodeId, mode: u16) -> Result<(), FfsError> {
+        self.meta.chmod(ino, mode).await
+    }
+
+    // ---------- Namespace writes ----------
 
     pub async fn create(
         &self,
@@ -144,12 +303,19 @@ impl VfsLayer {
         } else {
             self.metrics.inc_forwarded_proposal();
         }
+
+        // Delete blocks before removing inode so no orphans on success.
+        if let Some(ino) = self.inodes.lookup(parent, &name) {
+            let manifest = self.inodes.get_manifest(ino);
+            for b in &manifest {
+                let _ = self.chunks.delete_block(b.block_id).await;
+            }
+        }
+
         self.meta.unlink(parent, name).await
     }
 
     pub async fn rmdir(&self, parent: InodeId, name: String) -> Result<(), FfsError> {
-        // Non-empty check before proposing — a directory with children
-        // cannot be removed.
         if let Some(ino) = self.inodes.lookup(parent, &name) {
             if !self.inodes.children(ino).is_empty() {
                 return Err(FfsError::StorageError("directory not empty".into()));
@@ -163,6 +329,7 @@ impl VfsLayer {
         } else {
             self.metrics.inc_forwarded_proposal();
         }
+
         self.meta.rmdir(parent, name).await
     }
 
@@ -181,103 +348,5 @@ impl VfsLayer {
         self.meta
             .rename(old_parent, old_name, new_parent, new_name)
             .await
-    }
-
-    /// Truncate `ino` to `size` bytes.
-    ///
-    /// If we're on the leader, we handle the blob data locally; otherwise
-    /// the metadata proposal goes through the forwarder and the data
-    /// rewrite happens on the leader (currently unsupported — non-zero
-    /// truncate from a follower is rejected).
-    pub async fn truncate(&self, ino: InodeId, size: u64) -> Result<(), FfsError> {
-        let is_leader = self.forwarder.is_leader().await;
-
-        if size == 0 {
-            // Fast path: empty the blob.
-            if is_leader {
-                self.data.write_blob(ino, &[]).await?;
-            } else {
-                // Follower cannot rewrite data — reject for now.
-                // (Truncating to zero only needs metadata for correctness
-                // of size, but the blob would linger on the leader.)
-                if self.getattr(ino).map(|i| i.size).unwrap_or(0) > 0 {
-                    return Err(FfsError::StorageError(
-                        "truncate to zero from follower not supported".into(),
-                    ));
-                }
-            }
-            self.meta.truncate(ino, 0).await?;
-            return Ok(());
-        }
-
-        if !is_leader {
-            return Err(FfsError::StorageError(
-                "truncate from follower not supported".into(),
-            ));
-        }
-
-        // Leader path: read, resize, write back.
-        let current = match self.data.read_blob(ino).await {
-            Ok(b) => b,
-            Err(FfsError::NotFound(_)) => Vec::new(),
-            Err(e) => return Err(e),
-        };
-        let new_len = (size as usize).min(current.len());
-        let mut new_data = current[..new_len].to_vec();
-        if (size as usize) > new_data.len() {
-            new_data.resize(size as usize, 0);
-        }
-        self.data.write_blob(ino, &new_data).await?;
-        self.meta.truncate(ino, size).await?;
-        Ok(())
-    }
-
-    pub async fn chmod(&self, ino: InodeId, mode: u16) -> Result<(), FfsError> {
-        self.meta.chmod(ino, mode).await
-    }
-
-    /// Write `data` to `ino` at `offset`.
-    ///
-    /// Only offset 0 is supported in this phase. Blob data is written
-    /// locally if we're the leader; a follower forwards the metadata
-    /// proposal but the data write itself is rejected (ADR-003 — data
-    /// lives on the leader only).
-    pub async fn write(
-        &self,
-        ino: InodeId,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<u32, FfsError> {
-        let info = self.getattr(ino)?;
-        if info.kind == FileType::Directory {
-            return Err(FfsError::StorageError("write on directory".into()));
-        }
-
-        if offset != 0 {
-            return Err(FfsError::StorageError(
-                "non-zero offset not supported yet".into(),
-            ));
-        }
-
-        // ADR-004: full replication. Every write goes to every node
-        // before returning to the client.
-        if self.forwarder.is_leader().await {
-            self.metrics.inc_local_proposal();
-            // Write locally first so the leader's own copy is durable
-            // even if a peer fails mid-replication.
-            self.data.write_blob(ino, data).await?;
-            // Then fan out. Waits for all acks or times out.
-            self.forwarder.replicate_blob(ino, data).await?;
-        } else {
-            self.metrics.inc_forwarded_proposal();
-            // Forward to leader. Leader writes + replicates.
-            self.forwarder.write_blob(ino, data).await?;
-        }
-
-        // Metadata (size) through Raft. By this point all nodes have
-        // the blob, so a subsequent read from any node succeeds.
-        self.meta.truncate(ino, data.len() as u64).await?;
-
-        Ok(data.len() as u32)
     }
 }

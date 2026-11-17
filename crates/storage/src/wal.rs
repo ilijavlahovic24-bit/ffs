@@ -23,6 +23,7 @@ pub enum WalOperation {
     WriteBlob { inode_id: InodeId },
     Truncate { inode_id: InodeId, size: u64 },
     Chmod { inode_id: InodeId, mode: u16 },
+    UpdateManifest { inode_id: InodeId, blocks: Vec<common::types::BlockRef> },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WalEntryPayload {

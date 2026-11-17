@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use consensus::{NodeState, RaftNode};
 use network::RaftServer;
+use storage::ChunkStore;
 
 /// Bind a listener on an ephemeral port and return it with its address.
 async fn bind() -> (TcpListener, SocketAddr) {
@@ -16,8 +17,7 @@ async fn bind() -> (TcpListener, SocketAddr) {
     (l, a)
 }
 
-/// Spawn a 3-node cluster over real TCP. Returns the nodes, addresses,
-/// and the server tasks (which run forever; drop the runtime to stop).
+/// Spawn a 3-node cluster over real TCP. Returns the nodes and addresses.
 async fn spawn_cluster() -> (
     HashMap<u64, Arc<Mutex<RaftNode>>>,
     HashMap<u64, SocketAddr>,
@@ -43,7 +43,7 @@ async fn spawn_cluster() -> (
             .filter(|&x| x != id)
             .collect();
 
-        // Fresh per-node WAL.
+        // Fresh per-node WAL for raft.
         let base = std::env::temp_dir().join(format!(
             "ferumfs-net-test-{}-{}",
             id,
@@ -56,22 +56,14 @@ async fn spawn_cluster() -> (
             RaftNode::with_persistence(id, peers, &wal).unwrap(),
         ));
 
-        // Build a DataPath for this node. The RaftServer needs it to
-        // serve ReadBlob requests from followers.
-        let storage_wal_path = base.with_extension("storage.wal");
-        let _ = std::fs::remove_file(&storage_wal_path);
-        let storage_wal = Arc::new(
-            storage::wal::MetadataWal::new(storage_wal_path).await.unwrap(),
-        );
-
+        // Build a ChunkStore for this node. The server needs it to
+        // serve block I/O requests from followers.
         let tmp_dir = base.join("tmp");
         let data_dir = base.join("data");
         std::fs::create_dir_all(&tmp_dir).unwrap();
         std::fs::create_dir_all(&data_dir).unwrap();
 
-        let data_path = Arc::new(
-            storage::wal::DataPath::new(tmp_dir, data_dir, storage_wal).await,
-        );
+        let chunks = Arc::new(ChunkStore::new(tmp_dir, data_dir));
 
         // Peer address map: everyone except self.
         let peer_addrs: HashMap<u64, SocketAddr> = addrs
@@ -80,7 +72,7 @@ async fn spawn_cluster() -> (
             .map(|(pid, a)| (*pid, *a))
             .collect();
 
-        let server = RaftServer::new(listener, node.clone(), peer_addrs, data_path);
+        let server = RaftServer::new(listener, node.clone(), peer_addrs, chunks);
         servers.push(tokio::spawn(server.run()));
 
         nodes.insert(id, node);

@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use common::error::FfsError;
 use consensus::RaftNode;
-use storage::wal::DataPath;
+use storage::ChunkStore;
 
 use crate::client::drive_round;
 use crate::connection::TcpConnection;
@@ -17,13 +17,13 @@ use crate::message::{decode, encode, RaftMessage};
 /// Drives one Raft node: accepts incoming RPCs and periodically ticks
 /// the node, dispatching its outbox to peers over TCP.
 ///
-/// Also handles client-side forwarding messages (`Propose`, `ReadBlob`)
+/// Also handles client-side forwarding messages (`Propose`, block I/O)
 /// sent by followers that need to route operations to the leader.
 pub struct RaftServer {
     listener: TcpListener,
     node: Arc<Mutex<RaftNode>>,
     peers: Arc<HashMap<u64, SocketAddr>>,
-    data_path: Arc<DataPath>,
+    chunks: Arc<ChunkStore>,
 }
 
 impl RaftServer {
@@ -31,13 +31,13 @@ impl RaftServer {
         listener: TcpListener,
         node: Arc<Mutex<RaftNode>>,
         peers: HashMap<u64, SocketAddr>,
-        data_path: Arc<DataPath>,
+        chunks: Arc<ChunkStore>,
     ) -> Self {
         Self {
             listener,
             node,
             peers: Arc::new(peers),
-            data_path,
+            chunks,
         }
     }
 
@@ -49,7 +49,7 @@ impl RaftServer {
             listener,
             node,
             peers,
-            data_path,
+            chunks,
         } = self;
 
         // Driver task: ticks the node and flushes its outbox.
@@ -62,11 +62,13 @@ impl RaftServer {
         // Accept loop.
         loop {
             let (stream, peer_addr) = listener.accept().await?;
+            tracing::debug!("incoming connection from {peer_addr}");
+
             let node = node.clone();
-            let data = data_path.clone();
+            let chunks = chunks.clone();
             let peers = peers.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_incoming(stream, node, data, peers).await {
+                if let Err(e) = handle_incoming(stream, node, chunks, peers).await {
                     tracing::debug!("connection from {peer_addr} closed: {e}");
                 }
             });
@@ -77,10 +79,7 @@ impl RaftServer {
 /// Driver loop: every 10 ms, tick the node, drain its outbox, and deliver
 /// messages to peers. Repeats for a few rounds if handling replies
 /// produces new outbox entries (e.g. becoming leader triggers heartbeats).
-async fn run_driver(
-    node: Arc<Mutex<RaftNode>>,
-    peers: Arc<HashMap<u64, SocketAddr>>,
-) {
+async fn run_driver(node: Arc<Mutex<RaftNode>>, peers: Arc<HashMap<u64, SocketAddr>>) {
     let mut interval = tokio::time::interval(Duration::from_millis(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -106,11 +105,11 @@ async fn run_driver(
 }
 
 /// Handle a single incoming connection: read one request, apply it to
-/// the node (or forward it), send the reply.
+/// the node (or handle it locally), send the reply.
 async fn handle_incoming(
     stream: tokio::net::TcpStream,
     node: Arc<Mutex<RaftNode>>,
-    data_path: Arc<DataPath>,
+    chunks: Arc<ChunkStore>,
     peers: Arc<HashMap<u64, SocketAddr>>,
 ) -> Result<(), FfsError> {
     let mut conn = TcpConnection::new(stream);
@@ -118,6 +117,7 @@ async fn handle_incoming(
     let msg = decode(&bytes)?;
 
     let reply = match msg {
+        // --- Raft RPC ---
         RaftMessage::RequestVote(req) => {
             let mut n = node.lock().await;
             let from = n.id;
@@ -130,50 +130,55 @@ async fn handle_incoming(
             let reply = n.handle_append_entries(req);
             RaftMessage::AppendEntriesReply { from, reply }
         }
+
+        // --- Client forwarding ---
         RaftMessage::Propose {
             command,
             allocate_inode,
         } => handle_propose(node.clone(), command, allocate_inode).await,
-        RaftMessage::ReadBlob { inode } => {
-            // Blob data lives only on the leader (ADR-003). Followers
-            // forward reads here; missing blobs are treated as empty.
-            let data = data_path.read_blob(inode).await.unwrap_or_default();
-            RaftMessage::ReadBlobReply { data }
-        }
-        RaftMessage::WriteBlob { inode, data } => {
-            // Write locally first. If that fails, no point in fanning out.
-            if let Err(e) = data_path.write_blob(inode, &data).await {
-                RaftMessage::WriteBlobReply {
+
+        // --- Block I/O (ADR-005) ---
+        RaftMessage::WriteBlock { block_id, data } => {
+            // Write locally first.
+            if let Err(e) = chunks.write_block(block_id, &data).await {
+                RaftMessage::WriteBlockReply {
                     success: false,
                     error: Some(e.to_string()),
                 }
             } else {
-                // Fan out to all peers and wait for all acks.
-                match crate::forwarder::replicate_to_all(&peers, inode, &data).await {
-                    Ok(()) => RaftMessage::WriteBlobReply {
+                // Fan out to peers with majority ack semantics.
+                match crate::forwarder::replicate_to_all(&peers, block_id, &data).await {
+                    Ok(()) => RaftMessage::WriteBlockReply {
                         success: true,
                         error: None,
                     },
-                    Err(e) => RaftMessage::WriteBlobReply {
+                    Err(e) => RaftMessage::WriteBlockReply {
                         success: false,
                         error: Some(e.to_string()),
                     },
                 }
             }
         }
-        RaftMessage::ReplicateBlob { inode, data } => {
-            match data_path.write_blob(inode, &data).await {
-                Ok(()) => RaftMessage::ReplicateBlobReply {
+        RaftMessage::FetchBlock { block_id } => {
+            match chunks.read_block(block_id).await {
+                Ok(d) => RaftMessage::FetchBlockReply { data: Some(d) },
+                Err(_) => RaftMessage::FetchBlockReply { data: None },
+            }
+        }
+        RaftMessage::ReplicateBlock { block_id, data } => {
+            match chunks.write_block(block_id, &data).await {
+                Ok(()) => RaftMessage::ReplicateBlockReply {
                     success: true,
                     error: None,
                 },
-                Err(e) => RaftMessage::ReplicateBlobReply {
+                Err(e) => RaftMessage::ReplicateBlockReply {
                     success: false,
                     error: Some(e.to_string()),
                 },
             }
         }
-        // We never receive replies on the server side.
+
+        // Replies never arrive on the server side.
         _ => {
             tracing::warn!("server received unexpected message; ignoring");
             return Ok(());
