@@ -151,25 +151,27 @@ async fn entry_replicates_to_all_nodes_over_tcp() {
     }
     let leader_id = leader_id.expect("no leader");
 
-    // Propose.
-    {
+    // Propose and capture the actual log index (no-op from become_leader
+    // occupies index 1, so client entries start at index 2).
+    let idx = {
         let mut l = nodes[&leader_id].lock().await;
-        l.propose(b"over-tcp".to_vec()).expect("leader accepts");
-    }
+        l.propose(b"over-tcp".to_vec()).expect("leader accepts")
+    };
+    assert!(idx >= 1);
 
     // Give replication time.
-    for _ in 0..50 {
+    for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // Every node must have the entry.
+    // Every node must have the entry at the actual index, with our command.
     for (id, n) in &nodes {
         let node = n.lock().await;
         let entry = node
             .log
-            .get(1)
-            .unwrap_or_else(|| panic!("node {id} missing entry 1"));
+            .get(idx)
+            .unwrap_or_else(|| panic!("node {id} missing entry {idx}"));
         assert_eq!(entry.command, b"over-tcp");
-        assert!(node.commit_index >= 1, "node {id} not committed");
+        assert!(node.commit_index >= idx, "node {id} not committed");
     }
 }

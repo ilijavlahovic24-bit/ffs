@@ -85,20 +85,19 @@ impl VfsLayer {
             return Err(FfsError::StorageError("read on directory".into()));
         }
 
-        let bytes = if self.forwarder.is_leader().await {
-            self.metrics.inc_local_read();
-            match self.data.read_blob(ino).await {
-                Ok(b) => b,
-                Err(FfsError::NotFound(_)) => Vec::new(),
-                Err(e) => return Err(e),
+        // With full replication (ADR-004), every node has every blob.
+        // Try local first; fall back to leader only if local is missing
+        // (transient during repair or right after a node joins).
+        let bytes = match self.data.read_blob(ino).await {
+            Ok(b) => {
+                self.metrics.inc_local_read();
+                b
             }
-        } else {
-            self.metrics.inc_forwarded_read();
-            match self.forwarder.read_blob(ino).await {
-                Ok(b) => b,
-                Err(FfsError::NotFound(_)) => Vec::new(),
-                Err(e) => return Err(e),
+            Err(FfsError::NotFound(_)) => {
+                self.metrics.inc_forwarded_read();
+                self.forwarder.read_blob(ino).await?
             }
+            Err(e) => return Err(e),
         };
 
         let start = offset as usize;
@@ -260,17 +259,23 @@ impl VfsLayer {
             ));
         }
 
-        // ADR-003: data lives on the leader. Followers forward the blob
-        // write over TCP; only the metadata (size) is replicated via Raft.
+        // ADR-004: full replication. Every write goes to every node
+        // before returning to the client.
         if self.forwarder.is_leader().await {
             self.metrics.inc_local_proposal();
+            // Write locally first so the leader's own copy is durable
+            // even if a peer fails mid-replication.
             self.data.write_blob(ino, data).await?;
+            // Then fan out. Waits for all acks or times out.
+            self.forwarder.replicate_blob(ino, data).await?;
         } else {
             self.metrics.inc_forwarded_proposal();
+            // Forward to leader. Leader writes + replicates.
             self.forwarder.write_blob(ino, data).await?;
         }
 
-        // Update size metadata through Raft so all nodes agree.
+        // Metadata (size) through Raft. By this point all nodes have
+        // the blob, so a subsequent read from any node succeeds.
         self.meta.truncate(ino, data.len() as u64).await?;
 
         Ok(data.len() as u32)

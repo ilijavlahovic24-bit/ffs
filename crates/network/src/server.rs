@@ -62,12 +62,11 @@ impl RaftServer {
         // Accept loop.
         loop {
             let (stream, peer_addr) = listener.accept().await?;
-            tracing::debug!("incoming connection from {peer_addr}");
-
             let node = node.clone();
             let data = data_path.clone();
+            let peers = peers.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_incoming(stream, node, data).await {
+                if let Err(e) = handle_incoming(stream, node, data, peers).await {
                     tracing::debug!("connection from {peer_addr} closed: {e}");
                 }
             });
@@ -112,6 +111,7 @@ async fn handle_incoming(
     stream: tokio::net::TcpStream,
     node: Arc<Mutex<RaftNode>>,
     data_path: Arc<DataPath>,
+    peers: Arc<HashMap<u64, SocketAddr>>,
 ) -> Result<(), FfsError> {
     let mut conn = TcpConnection::new(stream);
     let bytes = conn.recv().await?;
@@ -141,12 +141,33 @@ async fn handle_incoming(
             RaftMessage::ReadBlobReply { data }
         }
         RaftMessage::WriteBlob { inode, data } => {
+            // Write locally first. If that fails, no point in fanning out.
+            if let Err(e) = data_path.write_blob(inode, &data).await {
+                RaftMessage::WriteBlobReply {
+                    success: false,
+                    error: Some(e.to_string()),
+                }
+            } else {
+                // Fan out to all peers and wait for all acks.
+                match crate::forwarder::replicate_to_all(&peers, inode, &data).await {
+                    Ok(()) => RaftMessage::WriteBlobReply {
+                        success: true,
+                        error: None,
+                    },
+                    Err(e) => RaftMessage::WriteBlobReply {
+                        success: false,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+        }
+        RaftMessage::ReplicateBlob { inode, data } => {
             match data_path.write_blob(inode, &data).await {
-                Ok(()) => RaftMessage::WriteBlobReply {
+                Ok(()) => RaftMessage::ReplicateBlobReply {
                     success: true,
                     error: None,
                 },
-                Err(e) => RaftMessage::WriteBlobReply {
+                Err(e) => RaftMessage::ReplicateBlobReply {
                     success: false,
                     error: Some(e.to_string()),
                 },

@@ -204,6 +204,9 @@ pub async fn replicate_to_all(
     inode: u64,
     data: &[u8],
 ) -> Result<(), FfsError> {
+    let total = peers.len() + 1;
+    let majority = total / 2 + 1;
+
     if peers.is_empty() {
         return Ok(());
     }
@@ -215,16 +218,15 @@ pub async fn replicate_to_all(
         set.spawn(async move {
             let msg = RaftMessage::ReplicateBlob { inode, data };
             let result = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
+                Duration::from_millis(500),
                 request_wire(addr, msg),
             )
                 .await;
-
             match result {
                 Ok(Ok(RaftMessage::ReplicateBlobReply { success: true, .. })) => Ok(()),
                 Ok(Ok(RaftMessage::ReplicateBlobReply { success: false, error })) => {
                     Err(FfsError::StorageError(format!(
-                        "peer rejected replicate: {}",
+                        "peer rejected: {}",
                         error.unwrap_or_else(|| "unknown".into())
                     )))
                 }
@@ -237,10 +239,15 @@ pub async fn replicate_to_all(
         });
     }
 
+    // Self already wrote locally, so we count 1 ack from the start.
+    let mut acked = 1u32;
     let mut first_err: Option<FfsError> = None;
+
     while let Some(res) = set.join_next().await {
         match res {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                acked += 1;
+            }
             Ok(Err(e)) => {
                 if first_err.is_none() {
                     first_err = Some(e);
@@ -248,14 +255,25 @@ pub async fn replicate_to_all(
             }
             Err(e) => {
                 if first_err.is_none() {
-                    first_err = Some(FfsError::StorageError(format!("join error: {e}")));
+                    first_err = Some(FfsError::StorageError(format!("join: {e}")));
                 }
             }
         }
     }
 
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(()),
+    if acked >= majority as u32 {
+        if acked < total as u32 {
+            tracing::warn!(
+                inode,
+                acked,
+                total,
+                "partial replication (majority achieved, will repair lazily)"
+            );
+        }
+        Ok(())
+    } else {
+        Err(first_err.unwrap_or_else(|| {
+            FfsError::StorageError(format!("only {acked}/{total} acked"))
+        }))
     }
 }
