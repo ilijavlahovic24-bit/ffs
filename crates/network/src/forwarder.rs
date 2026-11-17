@@ -171,6 +171,14 @@ impl RaftForwarder {
             _ => Err(FfsError::StorageError("unexpected reply type".into())),
         }
     }
+
+    /// Replicate a blob to all peers. Blocks until every peer acks.
+    ///
+    /// Only valid on the leader — followers should use `write_blob`,
+    /// which forwards to the leader who will do the replication.
+    pub async fn replicate_blob(&self, inode: u64, data: &[u8]) -> Result<(), FfsError> {
+        replicate_to_all(&self.peers, inode, data).await
+    }
 }
 
 // Re-export helpers used elsewhere.
@@ -182,4 +190,72 @@ pub async fn request_wire(
     conn.send(&encode(&msg)?).await?;
     let bytes = conn.recv().await?;
     decode(&bytes)
+}
+
+/// Fan-out a blob to all peers. Returns `Ok` only if every peer acked
+/// within the timeout. Any failure (peer down, slow, or returned error)
+/// propagates to the caller.
+///
+/// The leader's own write is not done here — the caller must have
+/// already written locally before calling this. Total durability is
+/// therefore `1 (self) + N (peers)`.
+pub async fn replicate_to_all(
+    peers: &HashMap<u64, SocketAddr>,
+    inode: u64,
+    data: &[u8],
+) -> Result<(), FfsError> {
+    if peers.is_empty() {
+        return Ok(());
+    }
+
+    let mut set = tokio::task::JoinSet::new();
+    for (_peer_id, addr) in peers {
+        let addr = *addr;
+        let data = data.to_vec();
+        set.spawn(async move {
+            let msg = RaftMessage::ReplicateBlob { inode, data };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                request_wire(addr, msg),
+            )
+                .await;
+
+            match result {
+                Ok(Ok(RaftMessage::ReplicateBlobReply { success: true, .. })) => Ok(()),
+                Ok(Ok(RaftMessage::ReplicateBlobReply { success: false, error })) => {
+                    Err(FfsError::StorageError(format!(
+                        "peer rejected replicate: {}",
+                        error.unwrap_or_else(|| "unknown".into())
+                    )))
+                }
+                Ok(Ok(_)) => Err(FfsError::StorageError("unexpected reply".into())),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(FfsError::StorageError(format!(
+                    "replicate to {addr} timed out"
+                ))),
+            }
+        });
+    }
+
+    let mut first_err: Option<FfsError> = None;
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(FfsError::StorageError(format!("join error: {e}")));
+                }
+            }
+        }
+    }
+
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
