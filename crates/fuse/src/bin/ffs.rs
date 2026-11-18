@@ -129,7 +129,11 @@ async fn main() -> Result<(), FfsError> {
         allocator,
         forwarder,
     ));
-
+    // Startup repair runs in the background — mount does not wait.
+    let vfs_for_repair = vfs.clone();
+    tokio::spawn(async move {
+        vfs_for_repair.startup_repair().await;
+    });
     // FUSE.
     let fs = DistributedFUSE::new(vfs);
     let uid = unsafe { libc::getuid() };

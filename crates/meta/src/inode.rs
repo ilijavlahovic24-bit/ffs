@@ -154,6 +154,11 @@ impl InodeManager {
         }
     }
 
+    /// List every inode that has a manifest (i.e., is a regular file
+    /// with at least one block). Used by startup repair.
+    pub fn inodes_with_manifests(&self) -> Vec<InodeId> {
+        self.manifests.iter().map(|e| *e.key()).collect()
+    }
     pub fn delete_manifest(&self, ino: InodeId) {
         self.manifests.remove(&ino);
     }

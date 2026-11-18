@@ -72,18 +72,20 @@ impl VfsLayer {
         match self.chunks.read_block(block_id).await {
             Ok(d) => {
                 self.metrics.inc_local_read();
+                self.metrics.inc_block_local_hit(d.len() as u64);
                 Ok(d)
             }
             Err(FfsError::NotFound(_)) => {
                 self.metrics.inc_forwarded_read();
                 let d = self.forwarder.fetch_block(block_id).await?;
-                // Cache locally for next read.
+                self.metrics.inc_block_peer_fetch(d.len() as u64);
                 let _ = self.chunks.write_block(block_id, &d).await;
                 Ok(d)
             }
             Err(e) => Err(e),
         }
     }
+
 
     /// Write one block.
     ///
@@ -370,4 +372,81 @@ impl VfsLayer {
             .rename(old_parent, old_name, new_parent, new_name)
             .await
     }
+
+    /// Ensure every block mentioned in a manifest is present locally.
+    ///
+    /// Called at startup after the state machine has caught up. Fetches
+    /// missing blocks from the leader. Blocks we can't fetch remain
+    /// absent; they are fetched lazily on the next read.
+    ///
+    /// Runs in the background — mount does not wait for it to finish.
+    pub async fn startup_repair(self: Arc<Self>) {
+        // Give Raft a moment to elect a leader.
+        let mut wait_attempts = 0;
+        while self.forwarder.current_leader().await.is_none() && wait_attempts < 600 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            wait_attempts += 1;
+        }
+
+        let self_id = self.forwarder.node_id().await;
+        let leader = self.forwarder.current_leader().await;
+
+        if leader == Some(self_id) {
+            tracing::info!("startup_repair: this node is leader, nothing to fetch");
+            return;
+        }
+        if leader.is_none() {
+            tracing::warn!("startup_repair: no leader after 60s, skipping");
+            return;
+        }
+
+        let inodes = self.inodes.inodes_with_manifests();
+        let mut total_blocks: u64 = 0;
+        let mut missing: u64 = 0;
+        let mut fetched: u64 = 0;
+
+        for ino in inodes {
+            for block_ref in self.inodes.get_manifest(ino) {
+                total_blocks += 1;
+                if self.chunks.has_block(block_ref.block_id).await {
+                    continue;
+                }
+                missing += 1;
+                match self.forwarder.fetch_block(block_ref.block_id).await {
+                    Ok(data) => {
+                        if self
+                            .chunks
+                            .write_block(block_ref.block_id, &data)
+                            .await
+                            .is_ok()
+                        {
+                            fetched += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            block_id = block_ref.block_id,
+                            "startup_repair fetch failed: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
+        if missing > 0 {
+            tracing::info!(
+                total = total_blocks,
+                missing,
+                fetched,
+                "startup_repair: done"
+            );
+        } else {
+            tracing::info!(
+                total = total_blocks,
+                "startup_repair: all blocks present"
+            );
+        }
+    }
+
+
 }

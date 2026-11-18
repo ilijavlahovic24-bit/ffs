@@ -119,31 +119,28 @@ impl RaftForwarder {
         let leader_id = self.wait_for_leader().await?;
         let self_id = self.node.lock().await.id;
         if leader_id == self_id {
-            return Err(FfsError::StorageError(
-                "write_block on leader (use local ChunkStore)".into(),
-            ));
+            return Err(FfsError::StorageError("write_block on leader".into()));
         }
-        let addr = *self
-            .peers
-            .get(&leader_id)
+        let addr = *self.peers.get(&leader_id)
             .ok_or_else(|| FfsError::ConsensusError(format!("unknown leader {leader_id}")))?;
-        let reply = request_wire(
-            addr,
-            RaftMessage::WriteBlock {
-                block_id,
-                data: data.to_vec(),
-            },
-        )
-            .await?;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            request_wire(addr, RaftMessage::WriteBlock {
+                block_id, data: data.to_vec(),
+            }),
+        ).await;
+
+        let reply = match result {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(FfsError::StorageError(format!("write_block {block_id} timeout"))),
+        };
+
         match reply {
-            RaftMessage::WriteBlockReply { success, error } => {
-                if success {
-                    Ok(())
-                } else {
-                    Err(FfsError::StorageError(
-                        error.unwrap_or_else(|| "write failed".into()),
-                    ))
-                }
+            RaftMessage::WriteBlockReply { success: true, .. } => Ok(()),
+            RaftMessage::WriteBlockReply { success: false, error } => {
+                Err(FfsError::StorageError(error.unwrap_or_else(|| "write failed".into())))
             }
             _ => Err(FfsError::StorageError("unexpected reply".into())),
         }
@@ -154,25 +151,27 @@ impl RaftForwarder {
         let leader_id = self.wait_for_leader().await?;
         let self_id = self.node.lock().await.id;
         if leader_id == self_id {
-            return Err(FfsError::StorageError(
-                "fetch_block on leader (read local)".into(),
-            ));
+            return Err(FfsError::StorageError("fetch_block on leader".into()));
         }
-        let addr = *self
-            .peers
-            .get(&leader_id)
+        let addr = *self.peers.get(&leader_id)
             .ok_or_else(|| FfsError::ConsensusError(format!("unknown leader {leader_id}")))?;
-        let reply = request_wire(addr, RaftMessage::FetchBlock { block_id }).await?;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            request_wire(addr, RaftMessage::FetchBlock { block_id }),
+        ).await;
+
+        let reply = match result {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(FfsError::StorageError(format!("fetch_block {block_id} timeout"))),
+        };
+
         match reply {
             RaftMessage::FetchBlockReply { data: Some(d) } => Ok(d),
             RaftMessage::FetchBlockReply { data: None } => Err(FfsError::NotFound(block_id)),
             _ => Err(FfsError::StorageError("unexpected reply".into())),
         }
-    }
-
-    /// Fan out a block to all peers, requiring a majority of acks.
-    pub async fn replicate_block(&self, block_id: u64, data: &[u8]) -> Result<(), FfsError> {
-        replicate_to_all(&self.peers, block_id, data).await
     }
 
     /// Snapshot of the peer map for background replication. Cheap clone.
