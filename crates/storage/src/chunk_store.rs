@@ -85,7 +85,11 @@ impl ChunkStore {
 
         let mut f = File::create(&tmp).await?;
         f.write_all(&buf).await?;
-        f.sync_all().await?;
+        // NO fsync here. We rely on:
+        //   (a) Raft WAL fsync in update_manifest (metadata durable)
+        //   (b) block replication to majority (data durable on peers)
+        //   (c) explicit FUSE fsync() from the client (if caller wants it)
+        // f.sync_all().await?;
         drop(f);
 
         tokio::fs::rename(&tmp, &dst).await?;

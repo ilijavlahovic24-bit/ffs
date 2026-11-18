@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use rand::Rng;
 
-pub const ELECTION_TIMEOUT_MIN_MS: u64 = 20000;
-pub const ELECTION_TIMEOUT_MAX_MS: u64 = 60000;
+pub const ELECTION_TIMEOUT_MIN_MS: u64 = 2000;
+pub const ELECTION_TIMEOUT_MAX_MS: u64 = 5000;
 pub const HEARTBEAT_INTERVAL_MS: u64 = 100;
 
 pub fn random_election_timeout() -> Duration {
