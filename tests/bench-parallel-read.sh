@@ -304,9 +304,9 @@ MIN=$C1
 [ $C2 -lt $MIN ] && MIN=$C2
 [ $C3 -lt $MIN ] && MIN=$C3
 if [ $((MAX - MIN)) -le 2 ]; then
-    echo "  ✓ Consistent (diff ≤ 2 blocks)"
+    echo " Consistent (diff ≤ 2 blocks)"
 else
-    echo "  ⚠ Lag: $((MAX - MIN)) blocks difference"
+    echo "  Lag: $((MAX - MIN)) blocks difference"
 fi
 
 echo ""
